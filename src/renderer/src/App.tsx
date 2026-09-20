@@ -37,7 +37,6 @@ import type {
   ListingScope,
   PatternHistoryEntry,
   QuickFilters,
-  SavedView,
   SortDir,
   SortField,
   WordFrequencyEntry
@@ -48,6 +47,7 @@ import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } fr
 import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
 import { usePinned } from './hooks/usePinned'
+import { useSavedViews } from './hooks/useSavedViews'
 import { useSettings } from './hooks/useSettings'
 import { useStorageBreakdown } from './hooks/useStorageBreakdown'
 
@@ -105,9 +105,6 @@ export default function App(): React.JSX.Element {
   const [undoStack, setUndoStack] = useState<FileAction[]>([])
   const [redoStack, setRedoStack] = useState<FileAction[]>([])
   const [trashCount, setTrashCount] = useState(0)
-  const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
-  const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
-  const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
   const loadingMore = useRef(false)
   const groupedVirtuosoRef = useRef<GroupedVirtuosoHandle>(null)
   const tableVirtuosoRef = useRef<TableVirtuosoHandle>(null)
@@ -169,6 +166,44 @@ export default function App(): React.JSX.Element {
       setColumnWidths({ ...DEFAULT_COLUMN_WIDTHS, ...loaded.columnWidths })
     },
     (message) => setFileOpError(message)
+  )
+
+  const {
+    savedViewsPanelOpen,
+    setSavedViewsPanelOpen,
+    saveViewDraftOpen,
+    saveViewNameDraft,
+    setSaveViewNameDraft,
+    handleOpenSaveView,
+    handleCancelSaveView,
+    handleCommitSaveView,
+    handleLoadView,
+    handleDeleteView
+  } = useSavedViews(
+    settings,
+    updateSettings,
+    () => ({
+      filterRules,
+      activeExtensionGroups: Array.from(activeExtensionGroups),
+      activeSizePreset,
+      activeDatePreset,
+      sortField,
+      sortDir,
+      groupWords,
+      displayMode,
+      viewMode
+    }),
+    (view) => {
+      setFilterRules(view.filterRules)
+      setActiveExtensionGroups(new Set(view.activeExtensionGroups))
+      setActiveSizePreset(view.activeSizePreset)
+      setActiveDatePreset(view.activeDatePreset)
+      setSortField(view.sortField)
+      setSortDir(view.sortDir)
+      setGroupWords(view.groupWords)
+      setDisplayMode(view.displayMode)
+      setViewMode(view.viewMode)
+    }
   )
 
   // Persistent layout (#32): auto-saves whenever the user changes sort/view mode or drags a
@@ -342,11 +377,11 @@ export default function App(): React.JSX.Element {
       setRenamingPath(null)
       setBulkRenameOpen(false)
       setSettingsPanelOpen(false)
-      setSaveViewDraftOpen(false)
+      handleCancelSaveView()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [renamingPath, bulkRenameOpen, settingsPanelOpen, saveViewDraftOpen])
+  }, [renamingPath, bulkRenameOpen, settingsPanelOpen, saveViewDraftOpen, handleCancelSaveView])
 
   useEffect(() => {
     void loadAggregate()
@@ -739,55 +774,6 @@ export default function App(): React.JSX.Element {
   const handleRevealInFolder = async (row: FileRow): Promise<void> => {
     setContextMenu(null)
     await window.api.revealInFolder(row.path)
-  }
-
-  const handleOpenSaveView = (): void => {
-    setSaveViewNameDraft('')
-    setSaveViewDraftOpen(true)
-    setSavedViewsPanelOpen(false)
-  }
-
-  const handleCancelSaveView = (): void => {
-    setSaveViewDraftOpen(false)
-  }
-
-  const handleCommitSaveView = async (): Promise<void> => {
-    const name = saveViewNameDraft.trim()
-    setSaveViewDraftOpen(false)
-    if (!name || !settings) return
-    const view: SavedView = {
-      id: `${Date.now()}`,
-      name,
-      createdAt: Date.now(),
-      filterRules,
-      activeExtensionGroups: Array.from(activeExtensionGroups),
-      activeSizePreset,
-      activeDatePreset,
-      sortField,
-      sortDir,
-      groupWords,
-      displayMode,
-      viewMode
-    }
-    await updateSettings({ savedViews: [...settings.savedViews, view] })
-  }
-
-  const handleLoadView = (view: SavedView): void => {
-    setFilterRules(view.filterRules)
-    setActiveExtensionGroups(new Set(view.activeExtensionGroups))
-    setActiveSizePreset(view.activeSizePreset)
-    setActiveDatePreset(view.activeDatePreset)
-    setSortField(view.sortField)
-    setSortDir(view.sortDir)
-    setGroupWords(view.groupWords)
-    setDisplayMode(view.displayMode)
-    setViewMode(view.viewMode)
-    setSavedViewsPanelOpen(false)
-  }
-
-  const handleDeleteView = async (id: string): Promise<void> => {
-    if (!settings) return
-    await updateSettings({ savedViews: settings.savedViews.filter((view) => view.id !== id) })
   }
 
   const handleDragStartRow = (event: React.DragEvent, row: FileRow): void => {
