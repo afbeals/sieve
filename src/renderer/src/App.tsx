@@ -12,8 +12,7 @@ import {
   Select,
   Stack,
   Text,
-  TextInput,
-  useMantineColorScheme
+  TextInput
 } from '@mantine/core'
 import {
   GroupedVirtuoso,
@@ -48,6 +47,7 @@ import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLU
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
 import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } from './pathUtils'
 import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
+import { useSettings } from './hooks/useSettings'
 
 export default function App(): React.JSX.Element {
   const [rootPath, setRootPath] = useState<string | null>(null)
@@ -110,9 +110,6 @@ export default function App(): React.JSX.Element {
   // filtered out of `rows` entirely by the time it's acted on.
   const [pinnedRows, setPinnedRows] = useState<Map<string, FileRow>>(new Map())
   const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false)
-  const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null)
-  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
   const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
   const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
   const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
@@ -121,7 +118,6 @@ export default function App(): React.JSX.Element {
   const [hoveredResizeColumn, setHoveredResizeColumn] = useState<string | null>(null)
   const [storageBreakdown, setStorageBreakdown] = useState<StorageBreakdownEntry[]>([])
   const [storagePanelOpen, setStoragePanelOpen] = useState(false)
-  const settingsLoadedRef = useRef(false)
   const loadingMore = useRef(false)
   const groupedVirtuosoRef = useRef<GroupedVirtuosoHandle>(null)
   const tableVirtuosoRef = useRef<TableVirtuosoHandle>(null)
@@ -141,25 +137,34 @@ export default function App(): React.JSX.Element {
     }
   }, [activeExtensionGroups, activeSizePreset, activeDatePreset])
 
-  // Settings apply as initial defaults for a fresh session (sort/view mode), not retroactively
-  // to whatever the user has already changed mid-session - loaded once on mount.
-  useEffect(() => {
-    void (async () => {
-      const loaded = await window.api.getSettings()
-      setSettings(loaded)
+  const {
+    settings,
+    settingsDraft,
+    settingsPanelOpen,
+    settingsLoadedRef,
+    setSettingsDraft,
+    setSettingsPanelOpen,
+    updateSettings,
+    handleOpenSettings,
+    handleCancelSettings,
+    handleSaveSettings,
+    handleExportConfig,
+    handleImportConfig
+  } = useSettings(
+    (loaded) => {
       setSortField(loaded.defaultSortField)
       setSortDir(loaded.defaultSortDir)
       setDisplayMode(loaded.defaultViewMode)
       setColumnWidths({ ...DEFAULT_COLUMN_WIDTHS, ...loaded.columnWidths })
-      settingsLoadedRef.current = true
-    })()
-  }, [])
+    },
+    (message) => setFileOpError(message)
+  )
 
   // Persistent layout (#32): auto-saves whenever the user changes sort/view mode or drags a
   // column wider/narrower, independent of the manual Settings panel save. Debounced so a
   // column drag (many rapid width changes) doesn't write to disk on every pixel. Gated on
   // settingsLoadedRef so this doesn't fire (and overwrite the just-loaded file with fresh-
-  // session defaults) before the initial load above has actually applied.
+  // session defaults) before useSettings's initial load has actually applied.
   useEffect(() => {
     if (!settingsLoadedRef.current) return
     const timer = setTimeout(() => {
@@ -171,20 +176,7 @@ export default function App(): React.JSX.Element {
       })
     }, 500)
     return () => clearTimeout(timer)
-  }, [sortField, sortDir, displayMode, columnWidths])
-
-  // Theme toggle (#36): Mantine's own color-scheme system (wired up in main.tsx's
-  // MantineProvider) now owns OS-preference tracking and, critically, sets the `color-scheme`
-  // CSS property at the root - which is what makes native <button>/<input>/<select> elements
-  // actually render with dark chrome instead of staying white ("white spots" the user found).
-  // We just sync our persisted `settings.theme` ('system' maps to Mantine's 'auto') into it. Our
-  // own custom-styled elements read Mantine's CSS variables directly (see the module-level
-  // `theme` object below), so they switch with the color scheme automatically with no JS branch.
-  const { setColorScheme } = useMantineColorScheme()
-  useEffect(() => {
-    if (!settings) return
-    setColorScheme(settings.theme === 'system' ? 'auto' : settings.theme)
-  }, [settings?.theme, setColorScheme])
+  }, [sortField, sortDir, displayMode, columnWidths, settingsLoadedRef])
 
   const currentDir = pathStack[pathStack.length - 1]?.path ?? rootPath
 
@@ -784,38 +776,6 @@ export default function App(): React.JSX.Element {
     setPinnedRows(new Map())
   }
 
-  const handleOpenSettings = (): void => {
-    if (settings) setSettingsDraft(settings)
-    setSettingsPanelOpen(true)
-  }
-
-  const handleCancelSettings = (): void => {
-    setSettingsPanelOpen(false)
-  }
-
-  const handleSaveSettings = async (): Promise<void> => {
-    if (!settingsDraft) return
-    const saved = await window.api.updateSettings(settingsDraft)
-    setSettings(saved)
-    setSettingsPanelOpen(false)
-  }
-
-  const handleExportConfig = async (): Promise<void> => {
-    await window.api.exportConfig()
-  }
-
-  const handleImportConfig = async (): Promise<void> => {
-    try {
-      const imported = await window.api.importConfig()
-      if (imported) {
-        setSettings(imported)
-        setSettingsDraft(imported)
-      }
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Import failed')
-    }
-  }
-
   const handleOpenSaveView = (): void => {
     setSaveViewNameDraft('')
     setSaveViewDraftOpen(true)
@@ -844,8 +804,7 @@ export default function App(): React.JSX.Element {
       displayMode,
       viewMode
     }
-    const saved = await window.api.updateSettings({ savedViews: [...settings.savedViews, view] })
-    setSettings(saved)
+    await updateSettings({ savedViews: [...settings.savedViews, view] })
   }
 
   const handleLoadView = (view: SavedView): void => {
@@ -863,8 +822,7 @@ export default function App(): React.JSX.Element {
 
   const handleDeleteView = async (id: string): Promise<void> => {
     if (!settings) return
-    const saved = await window.api.updateSettings({ savedViews: settings.savedViews.filter((view) => view.id !== id) })
-    setSettings(saved)
+    await updateSettings({ savedViews: settings.savedViews.filter((view) => view.id !== id) })
   }
 
   const handleDragStartRow = (event: React.DragEvent, row: FileRow): void => {
