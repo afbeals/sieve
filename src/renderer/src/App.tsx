@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  GroupedVirtuoso,
-  TableVirtuoso,
-  VirtuosoGrid,
-  type GridItemProps,
-  type GroupedVirtuosoHandle,
-  type TableVirtuosoHandle,
-  type VirtuosoGridHandle
-} from 'react-virtuoso'
-import { IconPin } from '@tabler/icons-react'
+import type { GridItemProps, GroupedVirtuosoHandle, TableVirtuosoHandle, VirtuosoGridHandle } from 'react-virtuoso'
 import { tokenizeFileName } from '../../shared/tokenize'
 import './gallery.css'
 import type {
@@ -24,12 +15,13 @@ import type {
   SortDir,
   SortField
 } from '../../shared/types'
-import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
-import { EXTENSION_GROUPS, RowIcon } from './fileDisplay'
+import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, theme } from './constants'
+import { EXTENSION_GROUPS } from './fileDisplay'
 import { Breadcrumbs } from './components/Breadcrumbs'
 import { BulkRenameModal } from './components/BulkRenameModal'
 import { ConfirmDialogModal } from './components/ConfirmDialogModal'
 import { ErrorToast } from './components/ErrorToast'
+import { GalleryListView, GroupedListView, TableListView } from './components/FileListViews'
 import { FilterRuleBuilder } from './components/FilterRuleBuilder'
 import { GroupingBar } from './components/GroupingBar'
 import { Lightbox } from './components/Lightbox'
@@ -40,7 +32,7 @@ import { SaveViewModal } from './components/SaveViewModal'
 import { SettingsModal } from './components/SettingsModal'
 import { StatusBar } from './components/StatusBar'
 import { Toolbar } from './components/Toolbar'
-import { basenameFallback, formatBytes } from './pathUtils'
+import { basenameFallback } from './pathUtils'
 import type { GalleryEntry, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
 import { useFileOps } from './hooks/useFileOps'
@@ -812,300 +804,69 @@ export default function App(): React.JSX.Element {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }} onContextMenu={(event) => handleContextMenu(event, null)}>
         {displayMode === 'gallery' ? (
-          <VirtuosoGrid
-            ref={galleryVirtuosoRef}
-            style={{ height: '100%' }}
-            data={galleryData}
+          <GalleryListView
+            galleryVirtuosoRef={galleryVirtuosoRef}
+            galleryData={galleryData}
+            groups={groups}
             endReached={groupWords.length === 0 ? handleEndReached : undefined}
-            listClassName="sieve-gallery-list"
-            itemClassName="sieve-gallery-item"
-            components={{ Item: GalleryItem }}
-            itemContent={(_index, entry) => {
-              if (entry.kind === 'divider') {
-                const collapsed = collapsedGroups.has(entry.label)
-                return (
-                  <div
-                    onClick={() => handleToggleGroupCollapse(entry.label)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      padding: '6px 4px',
-                      cursor: 'pointer',
-                      userSelect: 'none',
-                      color: theme.muted,
-                      fontSize: 12
-                    }}
-                  >
-                    <span style={{ whiteSpace: 'nowrap' }}>
-                      {collapsed ? '▸' : '▾'} {entry.label}
-                    </span>
-                    <span style={{ flex: 1, borderBottom: `1px solid ${theme.border}` }} />
-                    <span style={{ whiteSpace: 'nowrap' }}>
-                      {entry.count.toLocaleString()} items, {formatBytes(entry.totalSizeBytes)}
-                    </span>
-                    <button
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        const groupRows = groups.find((g) => g.label === entry.label)?.rows ?? []
-                        handleDeleteClick(groupRows)
-                      }}
-                      style={{ fontSize: 11, color: theme.dangerText }}
-                    >
-                      Delete all
-                    </button>
-                  </div>
-                )
-              }
-              const row = entry.row
-              const isSelected = selectedRows.some((r) => r.path === row.path)
-              const isDragOver = dragOverPath === row.path
-              return (
-                <div
-                  draggable
-                  onDragStart={(event) => handleDragStartRow(event, row)}
-                  onDragOver={(event) => handleDragOverRow(event, row)}
-                  onDragLeave={handleDragLeaveRow}
-                  onDrop={(event) => void handleDropOnRow(event, row)}
-                  onClick={(event) => handleSelectRow(row, event)}
-                  onContextMenu={(event) => handleContextMenu(event, row)}
-                  style={{
-                    flex: 1,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: 10,
-                    border: isDragOver
-                      ? `1px solid ${theme.dragOverBorder}`
-                      : isSelected
-                        ? `1px solid ${theme.selectedBorder}`
-                        : `1px solid ${theme.border}`,
-                    background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
-                    borderRadius: 6,
-                    cursor: row.isDirectory ? 'pointer' : 'default',
-                    textAlign: 'center'
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '100%',
-                      aspectRatio: '1',
-                      background: theme.headerBg,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: 32,
-                      overflow: 'hidden'
-                    }}
-                  >
-                    <RowIcon row={row} size={32} fill />
-                  </div>
-                  <span style={{ fontSize: 12, wordBreak: 'break-word' }}>
-                    {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
-                    {renderNameText(row)}
-                  </span>
-                  {!row.isDirectory && (
-                    <span style={{ fontSize: 11, color: theme.muted }}>{formatBytes(row.size)}</span>
-                  )}
-                </div>
-              )
-            }}
+            GalleryItemComponent={GalleryItem}
+            collapsedGroups={collapsedGroups}
+            selectedRows={selectedRows}
+            dragOverPath={dragOverPath}
+            pinnedRows={pinnedRows}
+            renderNameText={renderNameText}
+            onToggleGroupCollapse={handleToggleGroupCollapse}
+            onDeleteClick={handleDeleteClick}
+            onDragStartRow={handleDragStartRow}
+            onDragOverRow={handleDragOverRow}
+            onDragLeaveRow={handleDragLeaveRow}
+            onDropOnRow={(event, row) => void handleDropOnRow(event, row)}
+            onSelectRow={handleSelectRow}
+            onContextMenu={handleContextMenu}
           />
         ) : groupWords.length > 0 ? (
-          <GroupedVirtuoso
-            ref={groupedVirtuosoRef}
-            style={{ height: '100%' }}
+          <GroupedListView
+            groupedVirtuosoRef={groupedVirtuosoRef}
             groupCounts={groupCounts}
-            groupContent={(index) => {
-              const group = groups[index]
-              const collapsed = collapsedGroups.has(group.label)
-              const totalSize = group.rows.reduce((sum, row) => (row.isDirectory ? sum : sum + row.size), 0)
-              return (
-                <div
-                  onClick={() => handleToggleGroupCollapse(group.label)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    background: theme.headerBg,
-                    color: theme.fg,
-                    padding: '6px 12px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    userSelect: 'none'
-                  }}
-                >
-                  <span>
-                    {collapsed ? '▸' : '▾'} {group.label} — {group.rows.length.toLocaleString()} items,{' '}
-                    {formatBytes(totalSize)}
-                  </span>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      handleDeleteClick(group.rows)
-                    }}
-                    style={{ fontSize: 11, fontWeight: 400, color: theme.dangerText }}
-                  >
-                    Delete all
-                  </button>
-                </div>
-              )
-            }}
-            itemContent={(index) => {
-              const row = groupFlatRows[index]
-              const isSelected = selectedRows.some((r) => r.path === row.path)
-              const isDragOver = dragOverPath === row.path
-              return (
-                <div
-                  draggable
-                  onDragStart={(event) => handleDragStartRow(event, row)}
-                  onDragOver={(event) => handleDragOverRow(event, row)}
-                  onDragLeave={handleDragLeaveRow}
-                  onDrop={(event) => void handleDropOnRow(event, row)}
-                  style={{
-                    display: 'flex',
-                    padding: '4px 12px',
-                    cursor: row.isDirectory ? 'pointer' : 'default',
-                    background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
-                    outline: isDragOver ? `1px solid ${theme.dragOverBorder}` : 'none'
-                  }}
-                  onClick={(event) => handleSelectRow(row, event)}
-                  onContextMenu={(event) => handleContextMenu(event, row)}
-                >
-                  <span style={{ flex: 1 }}>
-                    <RowIcon row={row} size={16} /> {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
-                    {renderNameText(row)}
-                  </span>
-                  <span style={{ width: 100, textAlign: 'right' }}>
-                    {row.isDirectory ? '' : row.size.toLocaleString()}
-                  </span>
-                  <span style={{ width: 180 }}>{new Date(row.mtimeMs).toLocaleString()}</span>
-                  <span style={{ width: 180 }}>{new Date(row.ctimeMs).toLocaleString()}</span>
-                </div>
-              )
-            }}
+            groups={groups}
+            groupFlatRows={groupFlatRows}
+            collapsedGroups={collapsedGroups}
+            selectedRows={selectedRows}
+            dragOverPath={dragOverPath}
+            pinnedRows={pinnedRows}
+            renderNameText={renderNameText}
+            onToggleGroupCollapse={handleToggleGroupCollapse}
+            onDeleteClick={handleDeleteClick}
+            onDragStartRow={handleDragStartRow}
+            onDragOverRow={handleDragOverRow}
+            onDragLeaveRow={handleDragLeaveRow}
+            onDropOnRow={(event, row) => void handleDropOnRow(event, row)}
+            onSelectRow={handleSelectRow}
+            onContextMenu={handleContextMenu}
           />
         ) : (
-          <TableVirtuoso
-            ref={tableVirtuosoRef}
-            style={{ height: '100%' }}
-            data={rows}
+          <TableListView
+            tableVirtuosoRef={tableVirtuosoRef}
+            rows={rows}
             endReached={handleEndReached}
-            components={{
-              // No `width: '100%'` here on purpose: with table-layout: fixed, a table forced to
-              // 100% width redistributes/stretches the declared per-column widths to fill that
-              // 100%, which mutes (or reverses) a manual resize - most visibly on the largest
-              // column (Name), which is exactly the "first column won't resize" symptom. Letting
-              // the table size to the natural sum of its column widths instead means resizing
-              // maps 1:1 to the drag distance; any leftover space just shows as gutter.
-              Table: (props) => <table {...props} style={{ ...props.style, tableLayout: 'fixed' }} />
-            }}
-            fixedHeaderContent={() => (
-              <tr style={{ background: theme.headerBg }}>
-                {SORT_COLUMNS.map((column) => (
-                  <th
-                    key={column.field}
-                    style={{
-                      position: 'relative',
-                      width: columnWidths[column.field] ?? DEFAULT_COLUMN_WIDTHS[column.field],
-                      textAlign: column.align,
-                      padding: 8,
-                      cursor: 'pointer',
-                      userSelect: 'none'
-                    }}
-                    onClick={() => handleSortClick(column.field)}
-                  >
-                    {column.label}
-                    {sortField === column.field ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
-                    <div
-                      onMouseDown={(event) => handleColumnResizeStart(column.field, event)}
-                      onClick={(event) => event.stopPropagation()}
-                      onMouseEnter={() => setHoveredResizeColumn(column.field)}
-                      onMouseLeave={() => setHoveredResizeColumn(null)}
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        right: -4,
-                        bottom: 0,
-                        width: 9,
-                        cursor: 'col-resize',
-                        display: 'flex',
-                        justifyContent: 'center'
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 2,
-                          height: '100%',
-                          background:
-                            activeResizeColumn === column.field || hoveredResizeColumn === column.field
-                              ? theme.accent
-                              : theme.border
-                        }}
-                      />
-                    </div>
-                  </th>
-                ))}
-              </tr>
-            )}
-            itemContent={(_index, row) => {
-              const isSelected = selectedRows.some((r) => r.path === row.path)
-              const isDragOver = dragOverPath === row.path
-              const cellStyle = {
-                padding: 8,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap' as const,
-                background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
-                outline: isDragOver ? `1px solid ${theme.dragOverBorder}` : 'none'
-              }
-              const dragProps = {
-                draggable: true,
-                onDragStart: (event: React.DragEvent) => handleDragStartRow(event, row),
-                onDragOver: (event: React.DragEvent) => handleDragOverRow(event, row),
-                onDragLeave: handleDragLeaveRow,
-                onDrop: (event: React.DragEvent) => void handleDropOnRow(event, row),
-                onContextMenu: (event: React.MouseEvent) => handleContextMenu(event, row)
-              }
-              return (
-                <>
-                  <td
-                    {...dragProps}
-                    style={{
-                      ...cellStyle,
-                      width: columnWidths.name ?? DEFAULT_COLUMN_WIDTHS.name,
-                      cursor: row.isDirectory ? 'pointer' : 'default'
-                    }}
-                    onClick={(event) => handleSelectRow(row, event)}
-                  >
-                    <RowIcon row={row} size={16} /> {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
-                    {renderNameText(row)}
-                  </td>
-                  <td
-                    {...dragProps}
-                    style={{ ...cellStyle, width: columnWidths.size ?? DEFAULT_COLUMN_WIDTHS.size, textAlign: 'right' }}
-                    onClick={(event) => handleSelectRow(row, event)}
-                  >
-                    {row.isDirectory ? '' : row.size.toLocaleString()}
-                  </td>
-                  <td
-                    {...dragProps}
-                    style={{ ...cellStyle, width: columnWidths.mtimeMs ?? DEFAULT_COLUMN_WIDTHS.mtimeMs }}
-                    onClick={(event) => handleSelectRow(row, event)}
-                  >
-                    {new Date(row.mtimeMs).toLocaleString()}
-                  </td>
-                  <td
-                    {...dragProps}
-                    style={{ ...cellStyle, width: columnWidths.ctimeMs ?? DEFAULT_COLUMN_WIDTHS.ctimeMs }}
-                    onClick={(event) => handleSelectRow(row, event)}
-                  >
-                    {new Date(row.ctimeMs).toLocaleString()}
-                  </td>
-                </>
-              )
-            }}
+            columnWidths={columnWidths}
+            sortField={sortField}
+            sortDir={sortDir}
+            activeResizeColumn={activeResizeColumn}
+            hoveredResizeColumn={hoveredResizeColumn}
+            selectedRows={selectedRows}
+            dragOverPath={dragOverPath}
+            pinnedRows={pinnedRows}
+            renderNameText={renderNameText}
+            onSortClick={handleSortClick}
+            onColumnResizeStart={handleColumnResizeStart}
+            onHoverResizeColumn={setHoveredResizeColumn}
+            onDragStartRow={handleDragStartRow}
+            onDragOverRow={handleDragOverRow}
+            onDragLeaveRow={handleDragLeaveRow}
+            onDropOnRow={(event, row) => void handleDropOnRow(event, row)}
+            onSelectRow={handleSelectRow}
+            onContextMenu={handleContextMenu}
           />
         )}
       </div>
