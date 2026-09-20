@@ -92,12 +92,35 @@ reliably.
 
 ### Windows
 
-```bash
-PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn dist:win
+**Must be run on an actual Windows machine.** This isn't a style preference — building the
+Windows target from macOS produces a build that reports success but is **broken** (see the
+`ffmpeg-static` explanation below). The build must happen on Windows itself.
+
+**Setup (PowerShell)** — the `PATH="..."yarn <cmd>` prefix used throughout this repo's docs
+elsewhere is **bash syntax and will not work in PowerShell or CMD**. On a real Windows machine,
+install Node 22.22.2 directly (via [nvm-windows](https://github.com/coreybutler/nvm-windows) or
+the plain [nodejs.org](https://nodejs.org/) installer) so it's just the active `node`/`yarn` on
+`PATH` — the bash `PATH=...` prefix trick exists only to work around this Mac's system Node
+being a version jsdom rejects; a fresh Windows install with the right Node version installed
+doesn't need it at all:
+
+```powershell
+git clone <this repo>
+cd sieve
+nvm install 22.22.2   # if using nvm-windows
+nvm use 22.22.2
+corepack enable        # or: npm install -g yarn
+yarn install
+yarn dist:win
 ```
 
-**Must be run on an actual Windows machine.** This isn't a style preference — building the
-Windows target from macOS produces a build that reports success but is **broken**:
+If `yarn install` fails with the same jsdom engine error documented in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md), it means Node 22.22.2 isn't actually the active
+version — check `node --version` before retrying, there's no PowerShell equivalent of the bash
+`PATH=` prefix workaround; you have to actually switch the active Node version.
+
+Building the Windows target from macOS instead of Windows produces a build that reports success
+but is **broken**:
 
 > `ffmpeg-static`'s `install.js` downloads only *one* binary — matching the platform/arch of the
 > machine running `yarn install` — not a copy for every platform. Its `index.js` then resolves
@@ -129,10 +152,23 @@ happens to run the build.
 
 Produces `dist/win-unpacked/Sieve.exe` (unpacked) and `dist/Sieve-<version>-win.zip`.
 
+**SmartScreen note** (the direct Windows equivalent of the macOS Gatekeeper note above): an
+unsigned `.exe` triggers a "Windows protected your PC" SmartScreen warning on first run. Click
+"More info" → "Run anyway". Expected for an unsigned build, not a bug.
+
+**Trash folder visibility**: soft-deleted files move to a `.dir-explorer-trash` folder under the
+scanned root (see [ARCHITECTURE.md](ARCHITECTURE.md)). The leading dot hides it by convention on
+macOS/Linux, but Windows has no such convention (hidden files there are an NTFS attribute, not a
+naming pattern) — so on Windows this folder will show up as an ordinary visible folder in File
+Explorer. Not a functional bug, just a rough edge nobody's smoothed over yet.
+
 ### What's still genuinely untested
 
-Everything here has been verified at the build/packaging level (binaries unpack correctly, run
-standalone, settings path is writable) but **not** through a full manual pass on a real Windows
-machine — path separators, drive letters, and file permission edge cases are Windows-specific
-behaviors that simply can't be exercised from macOS. Treat the first real run on Windows as the
-actual test, not this build step.
+Everything above the two notes just made has been verified at the build/packaging level
+(binaries unpack correctly, run standalone, settings path is writable) — **not** through a real
+run on a real Windows machine. Concretely still unverified: chokidar's Windows filesystem-watch
+backend, actual drive-letter path handling end to end, real NTFS permission behavior, and
+anything that only shows up by actually clicking through the app. Source-level review (grepping
+for hardcoded `/` path-joining) found nothing suspicious — everything goes through `node:path`'s
+platform-aware `join`/`dirname`/`sep` — but that's static review, not a substitute for actually
+running it. Treat the first real run on Windows as the actual test, not this build step.

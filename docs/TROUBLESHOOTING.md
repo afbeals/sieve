@@ -19,7 +19,8 @@ by Yarn on **every** command that touches the dependency tree, not just test run
 renderer tests) all hit this. `yarn typecheck`, `yarn build`, and `yarn dev` are unaffected — they
 never load jsdom.
 
-**Fix**: run the affected command with Node 22.22.2 (pinned in `.nvmrc`) explicitly on `PATH`:
+**Fix (macOS/Linux, bash/zsh)**: run the affected command with Node 22.22.2 (pinned in
+`.nvmrc`) explicitly on `PATH`:
 
 ```bash
 PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn test
@@ -30,6 +31,17 @@ Or switch your shell's active Node first if your `nvm` setup auto-loads `.nvmrc`
 
 ```bash
 nvm use
+yarn test
+```
+
+**Fix (Windows)**: there's no PowerShell/CMD equivalent of the bash `PATH=` prefix — install
+Node 22.22.2 directly (via [nvm-windows](https://github.com/coreybutler/nvm-windows) or the
+plain [nodejs.org](https://nodejs.org/) installer), confirm it's active with `node --version`,
+then run the command normally:
+
+```powershell
+nvm use 22.22.2   # if using nvm-windows
+node --version    # confirm it says v22.22.2 before proceeding
 yarn test
 ```
 

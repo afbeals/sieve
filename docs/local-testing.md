@@ -7,7 +7,15 @@
 - Yarn (classic v1)
 
 ```bash
+# macOS/Linux
 nvm use               # or: PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" for one-off commands
+yarn install
+```
+
+```powershell
+# Windows (PowerShell) - no PATH= prefix equivalent, switch the active Node version instead
+nvm use 22.22.2        # if using nvm-windows
+node --version         # confirm v22.22.2 before proceeding
 yarn install
 ```
 
@@ -84,8 +92,16 @@ running Electron window. Before relying on a change, walk through:
 ## 3. Run the automated test suite
 
 ```bash
+# macOS/Linux
 PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn test        # once
 PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn test:watch  # watch mode
+```
+
+```powershell
+# Windows (PowerShell) - confirm `node --version` is 22.22.2 first (see Prerequisites above),
+# then run normally; there's no PATH= prefix equivalent
+yarn test
+yarn test:watch
 ```
 
 70 tests across 7 files as of this writing:
@@ -139,8 +155,13 @@ two project configs.
 Before actually distributing a build, a quick local sanity check:
 
 ```bash
-PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn dist:mac   # on macOS
-PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn dist:win   # on Windows, see PACKAGING.md
+# macOS
+PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn dist:mac
+```
+
+```powershell
+# Windows (PowerShell) - must be run on an actual Windows machine, see PACKAGING.md
+yarn dist:win
 ```
 
 See [PACKAGING.md](PACKAGING.md) for what to actually check once it's built (it is *not* enough

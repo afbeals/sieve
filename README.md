@@ -66,11 +66,17 @@ Pick a folder via "Choose folder…" and it starts indexing immediately.
 Node 22.22.2 is pinned because `jsdom` (a test-only dependency) rejects the system's default
 Node (24.13.0 here) at its declared engine range. This affects **every** `yarn` command, not
 just tests - `yarn install`, `yarn add`, etc. all need to run under Node 22. If you don't use
-`nvm`/`.nvmrc` switching automatically, prefix commands explicitly:
+`nvm`/`.nvmrc` switching automatically, prefix commands explicitly (macOS/Linux, bash/zsh):
 
 ```bash
 PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" yarn <command>
 ```
+
+**On Windows**, there's no PowerShell/CMD equivalent of that `PATH=` prefix trick - install Node
+22.22.2 directly (via [nvm-windows](https://github.com/coreybutler/nvm-windows) or the plain
+[nodejs.org](https://nodejs.org/) installer) and make sure it's the active version
+(`nvm use 22.22.2`, or just don't have another Node version installed) before running any
+`yarn` command.
 
 `yarn typecheck`, `yarn build`, and `yarn dev` are unaffected by this and work fine under the
 system Node - only commands that touch the package tree or invoke `jsdom` (`yarn test`, `yarn
