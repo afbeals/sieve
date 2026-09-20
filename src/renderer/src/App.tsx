@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader } from '@mantine/core'
 import {
   GroupedVirtuoso,
   TableVirtuoso,
@@ -9,7 +8,7 @@ import {
   type TableVirtuosoHandle,
   type VirtuosoGridHandle
 } from 'react-virtuoso'
-import { IconPin, IconX } from '@tabler/icons-react'
+import { IconPin } from '@tabler/icons-react'
 import { tokenizeFileName } from '../../shared/tokenize'
 import './gallery.css'
 import type {
@@ -27,14 +26,18 @@ import type {
 } from '../../shared/types'
 import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
+import { Breadcrumbs } from './components/Breadcrumbs'
 import { BulkRenameModal } from './components/BulkRenameModal'
 import { ConfirmDialogModal } from './components/ConfirmDialogModal'
+import { ErrorToast } from './components/ErrorToast'
 import { FilterRuleBuilder } from './components/FilterRuleBuilder'
 import { GroupingBar } from './components/GroupingBar'
+import { Lightbox } from './components/Lightbox'
 import { QuickFilterChips } from './components/QuickFilterChips'
 import { RowContextMenu } from './components/RowContextMenu'
 import { SaveViewModal } from './components/SaveViewModal'
 import { SettingsModal } from './components/SettingsModal'
+import { StatusBar } from './components/StatusBar'
 import { Toolbar } from './components/Toolbar'
 import { basenameFallback, formatBytes } from './pathUtils'
 import type { GalleryEntry, PreviewSlot, StackEntry } from './types'
@@ -927,22 +930,7 @@ export default function App(): React.JSX.Element {
           `}</style>
         </div>
       )}
-      {pathStack.length > 0 && (
-        <div style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}` }}>
-          {pathStack.map((entry, index) => (
-            <span key={entry.path}>
-              {index > 0 && <span style={{ margin: '0 4px' }}>/</span>}
-              <button
-                style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
-                disabled={index === pathStack.length - 1}
-                onClick={() => handleBreadcrumbClick(index)}
-              >
-                {entry.label}
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+      <Breadcrumbs pathStack={pathStack} onBreadcrumbClick={handleBreadcrumbClick} />
       <QuickFilterChips
         activeExtensionGroups={activeExtensionGroups}
         activeSizePreset={activeSizePreset}
@@ -1329,27 +1317,7 @@ export default function App(): React.JSX.Element {
         </div>
       </div>
       </div>
-      {lightboxUrl && (
-        <div
-          onClick={() => setLightboxUrl(null)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.85)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            cursor: 'zoom-out'
-          }}
-        >
-          <img
-            src={lightboxUrl}
-            alt=""
-            style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain' }}
-          />
-        </div>
-      )}
+      {lightboxUrl && <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
       <RowContextMenu
         contextMenu={contextMenu}
         onClose={() => setContextMenu(null)}
@@ -1394,58 +1362,9 @@ export default function App(): React.JSX.Element {
         onExportConfig={() => void handleExportConfig()}
         onImportConfig={() => void handleImportConfig()}
       />
-      {fileOpError && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 40,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: theme.errorBg,
-            color: theme.errorText,
-            border: `1px solid ${theme.errorText}`,
-            borderRadius: 6,
-            padding: '8px 14px',
-            fontSize: 13,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            zIndex: 1200
-          }}
-        >
-          {fileOpError}
-          <button
-            onClick={() => setFileOpError(null)}
-            style={{ display: 'flex', border: 'none', background: 'transparent', cursor: 'pointer' }}
-          >
-            <IconX size={14} />
-          </button>
-        </div>
-      )}
+      {fileOpError && <ErrorToast message={fileOpError} onDismiss={() => setFileOpError(null)} />}
       <ConfirmDialogModal dialog={confirmDialog} onClose={() => setConfirmDialog(null)} />
-      <div
-        style={{
-          padding: '4px 12px',
-          borderTop: `1px solid ${theme.border}`,
-          fontSize: 12,
-          color: theme.muted,
-          background: theme.headerBg,
-          display: 'flex',
-          justifyContent: 'space-between'
-        }}
-      >
-        <span>
-          {aggregate
-            ? `${aggregate.count.toLocaleString()} items in view · ${formatBytes(aggregate.totalSizeBytes)}`
-            : '—'}
-        </span>
-        {backgroundStatus && (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Loader size="xs" />
-            {backgroundStatus}
-          </span>
-        )}
-      </div>
+      <StatusBar aggregate={aggregate} backgroundStatus={backgroundStatus} />
     </div>
   )
 }
