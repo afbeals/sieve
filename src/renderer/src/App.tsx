@@ -49,6 +49,7 @@ import { useColumnLayout } from './hooks/useColumnLayout'
 import { usePinned } from './hooks/usePinned'
 import { usePreview } from './hooks/usePreview'
 import { useSavedViews } from './hooks/useSavedViews'
+import { useSelection } from './hooks/useSelection'
 import { useSettings } from './hooks/useSettings'
 import { useStorageBreakdown } from './hooks/useStorageBreakdown'
 
@@ -83,7 +84,6 @@ export default function App(): React.JSX.Element {
   const [groupedLoading, setGroupedLoading] = useState(false)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [aggregate, setAggregate] = useState<ListingAggregate | null>(null)
-  const [selectedRows, setSelectedRows] = useState<FileRow[]>([])
   const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut' } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: FileRow | null } | null>(null)
   const [renamingPath, setRenamingPath] = useState<string | null>(null)
@@ -119,6 +119,10 @@ export default function App(): React.JSX.Element {
       modifiedAfterMs: datePreset ? Date.now() - datePreset.withinMs : undefined
     }
   }, [activeExtensionGroups, activeSizePreset, activeDatePreset])
+
+  const { selectedRows, setSelectedRows, handleSelectRow, selectionAggregate } = useSelection((row) =>
+    handleRowActivate(row)
+  )
 
   const {
     columnWidths,
@@ -307,31 +311,6 @@ export default function App(): React.JSX.Element {
     filterRules,
     quickFilters
   )
-
-  // Manual double-click detection (click timestamps) instead of the native `dblclick` event:
-  // every row is `draggable` for drag-to-move, and Chromium's drag-vs-click disambiguation on
-  // the second mousedown of a fast double-click can swallow the synthetic `dblclick` entirely,
-  // even though the plain `click` events themselves still fire fine. Confirmed live - the
-  // right-click "Open" menu item (same handleRowActivate call) worked, but `onDoubleClick` on
-  // the row never fired at all.
-  const lastRowClickRef = useRef<{ path: string; time: number } | null>(null)
-
-  const handleSelectRow = (row: FileRow, event: React.MouseEvent): void => {
-    const now = Date.now()
-    const last = lastRowClickRef.current
-    lastRowClickRef.current = { path: row.path, time: now }
-    if (last && last.path === row.path && now - last.time < 400) {
-      lastRowClickRef.current = null
-      handleRowActivate(row)
-      return
-    }
-    const toggle = event.metaKey || event.ctrlKey
-    setSelectedRows((prev) => {
-      if (!toggle) return [row]
-      const alreadySelected = prev.some((r) => r.path === row.path)
-      return alreadySelected ? prev.filter((r) => r.path !== row.path) : [...prev, row]
-    })
-  }
 
   const {
     previewSlots,
@@ -1078,12 +1057,6 @@ export default function App(): React.JSX.Element {
     const sharedWord = tokenizeFileName(b.name).find((word) => tokensA.has(word))
     if (sharedWord) hints.push(`Shares word "${sharedWord}"`)
     return hints
-  }, [selectedRows])
-
-  const selectionAggregate = useMemo((): { count: number; totalSizeBytes: number } | null => {
-    if (selectedRows.length <= 1) return null
-    const totalSizeBytes = selectedRows.reduce((sum, row) => (row.isDirectory ? sum : sum + row.size), 0)
-    return { count: selectedRows.length, totalSizeBytes }
   }, [selectedRows])
 
   function renderPreviewCard(slot: PreviewSlot, slotIndex: number, cardWidth: number): React.JSX.Element {
