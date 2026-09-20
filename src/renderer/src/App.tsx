@@ -4,7 +4,6 @@ import {
   Checkbox,
   Group,
   Loader,
-  Menu,
   Popover,
   SegmentedControl,
   Select,
@@ -40,6 +39,7 @@ import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLU
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
 import { BulkRenameModal } from './components/BulkRenameModal'
 import { ConfirmDialogModal } from './components/ConfirmDialogModal'
+import { RowContextMenu } from './components/RowContextMenu'
 import { SaveViewModal } from './components/SaveViewModal'
 import { SettingsModal } from './components/SettingsModal'
 import { basenameFallback, describeFileAction, formatBytes } from './pathUtils'
@@ -1830,50 +1830,26 @@ export default function App(): React.JSX.Element {
           />
         </div>
       )}
-      <Menu opened={!!contextMenu} onClose={() => setContextMenu(null)} position="bottom-start" shadow="md" width={190}>
-        <Menu.Target>
-          <div style={{ position: 'fixed', top: contextMenu?.y ?? 0, left: contextMenu?.x ?? 0, width: 0, height: 0 }} />
-        </Menu.Target>
-        <Menu.Dropdown>
-          {contextMenu?.row ? (
-            <>
-              {selectedRows.length === 1 && (
-                <Menu.Item onClick={() => handleRowActivate(contextMenu.row as FileRow)}>Open</Menu.Item>
-              )}
-              {selectedRows.length <= 1 ? (
-                <Menu.Item onClick={() => handleStartRename(contextMenu.row as FileRow)}>Rename</Menu.Item>
-              ) : (
-                <Menu.Item onClick={handleStartBulkRename}>Rename {selectedRows.length} items…</Menu.Item>
-              )}
-              <Menu.Item onClick={() => void handleDuplicate()}>Duplicate</Menu.Item>
-              <Menu.Item onClick={handleCut}>Cut</Menu.Item>
-              <Menu.Item onClick={handleCopy}>Copy</Menu.Item>
-              {Boolean(contextMenu.row.isDirectory) && fileClipboard && (
-                <Menu.Item onClick={() => void handlePaste((contextMenu.row as FileRow).path)}>Paste here</Menu.Item>
-              )}
-              <Menu.Item onClick={() => void handleCopyPath()}>Copy Path{selectedRows.length > 1 ? 's' : ''}</Menu.Item>
-              <Menu.Item onClick={() => void handleRevealInFolder(contextMenu.row as FileRow)}>Reveal in folder</Menu.Item>
-              <Menu.Item onClick={handleTogglePinSelected}>
-                {allSelectedPinned
-                  ? `Unpin ${selectedRows.length > 1 ? `${selectedRows.length} items` : ''}`
-                  : `Pin ${selectedRows.length > 1 ? `${selectedRows.length} items` : ''}`}
-              </Menu.Item>
-              <Menu.Item color="red" onClick={() => handleDeleteClick()}>
-                Delete
-              </Menu.Item>
-            </>
-          ) : (
-            <>
-              <Menu.Item onClick={() => void handleNewFolder()}>New Folder</Menu.Item>
-              {fileClipboard && currentDir && (
-                <Menu.Item onClick={() => void handlePaste(currentDir)}>
-                  Paste {fileClipboard.paths.length} item{fileClipboard.paths.length === 1 ? '' : 's'}
-                </Menu.Item>
-              )}
-            </>
-          )}
-        </Menu.Dropdown>
-      </Menu>
+      <RowContextMenu
+        contextMenu={contextMenu}
+        onClose={() => setContextMenu(null)}
+        selectedCount={selectedRows.length}
+        allSelectedPinned={allSelectedPinned}
+        fileClipboard={fileClipboard}
+        currentDir={currentDir}
+        onActivateRow={handleRowActivate}
+        onStartRename={handleStartRename}
+        onStartBulkRename={handleStartBulkRename}
+        onDuplicate={() => void handleDuplicate()}
+        onCut={handleCut}
+        onCopy={handleCopy}
+        onPaste={(destDir) => void handlePaste(destDir)}
+        onCopyPath={() => void handleCopyPath()}
+        onRevealInFolder={(row) => void handleRevealInFolder(row)}
+        onTogglePinSelected={handleTogglePinSelected}
+        onDeleteClick={() => handleDeleteClick()}
+        onNewFolder={() => void handleNewFolder()}
+      />
       <BulkRenameModal
         opened={bulkRenameOpen}
         itemCount={selectedRows.length}
