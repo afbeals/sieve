@@ -1,15 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Button,
-  Checkbox,
-  Group,
-  Loader,
-  Popover,
-  SegmentedControl,
-  Select,
-  Text,
-  TextInput
-} from '@mantine/core'
+import { Button, Checkbox, Loader, Select, TextInput } from '@mantine/core'
 import {
   GroupedVirtuoso,
   TableVirtuoso,
@@ -19,7 +9,7 @@ import {
   type TableVirtuosoHandle,
   type VirtuosoGridHandle
 } from 'react-virtuoso'
-import { IconChartBar, IconPin, IconSettings, IconX } from '@tabler/icons-react'
+import { IconPin, IconX } from '@tabler/icons-react'
 import { tokenizeFileName } from '../../shared/tokenize'
 import './gallery.css'
 import type {
@@ -42,7 +32,8 @@ import { ConfirmDialogModal } from './components/ConfirmDialogModal'
 import { RowContextMenu } from './components/RowContextMenu'
 import { SaveViewModal } from './components/SaveViewModal'
 import { SettingsModal } from './components/SettingsModal'
-import { basenameFallback, describeFileAction, formatBytes } from './pathUtils'
+import { Toolbar } from './components/Toolbar'
+import { basenameFallback, formatBytes } from './pathUtils'
 import type { GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
 import { useFileOps } from './hooks/useFileOps'
@@ -872,288 +863,49 @@ export default function App(): React.JSX.Element {
         color: theme.fg
       }}
     >
-      <Group
-        gap="sm"
-        wrap="wrap"
-        style={{ padding: 12, borderBottom: `1px solid ${theme.border}` }}
-      >
-        <Button variant="default" size="sm" onClick={handlePickRoot}>
-          Choose folder…
-        </Button>
-        <Checkbox
-          label="Show entire subtree"
-          checked={viewMode === 'recursive'}
-          onChange={(event) => setViewMode(event.currentTarget.checked ? 'recursive' : 'folder')}
-        />
-        <SegmentedControl
-          size="sm"
-          value={displayMode}
-          onChange={(value) => setDisplayMode(value as 'table' | 'gallery')}
-          data={[
-            { label: 'Table', value: 'table' },
-            { label: 'Gallery', value: 'gallery' }
-          ]}
-        />
-        {rootPath && !scanning && (
-          <Button variant="default" size="sm" onClick={handleRescan}>
-            Rescan
-          </Button>
-        )}
-        {rootPath && currentDir && !scanning && (
-          <Button variant="default" size="sm" onClick={handleNewFolder}>
-            New Folder
-          </Button>
-        )}
-        {rootPath && currentDir && !scanning && fileClipboard && (
-          <Button variant="default" size="sm" onClick={() => void handlePaste(currentDir)}>
-            Paste {fileClipboard.paths.length} item{fileClipboard.paths.length === 1 ? '' : 's'}
-          </Button>
-        )}
-        {rootPath && !scanning && (
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => void handleUndo()}
-            disabled={undoStack.length === 0}
-            title={undoStack.length > 0 ? `Undo ${describeFileAction(undoStack[undoStack.length - 1])}` : undefined}
-          >
-            Undo
-          </Button>
-        )}
-        {rootPath && !scanning && (
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => void handleRedo()}
-            disabled={redoStack.length === 0}
-            title={redoStack.length > 0 ? `Redo ${describeFileAction(redoStack[redoStack.length - 1])}` : undefined}
-          >
-            Redo
-          </Button>
-        )}
-        {rootPath && !scanning && selectedRows.length > 0 && (
-          <Button variant="light" color="red" size="sm" onClick={() => handleDeleteClick()}>
-            Delete {selectedRows.length} item{selectedRows.length === 1 ? '' : 's'}
-          </Button>
-        )}
-        {rootPath && !scanning && trashCount > 0 && (
-          <Button variant="default" size="sm" onClick={handleEmptyTrashClick}>
-            Empty Trash ({trashCount})
-          </Button>
-        )}
-        {rootPath && (
-          <Popover opened={pinnedPanelOpen} onChange={setPinnedPanelOpen} position="bottom-end" width={300} shadow="md">
-            <Popover.Target>
-              <Button
-                variant="default"
-                size="sm"
-                leftSection={<IconPin size={14} />}
-                disabled={pinnedRows.size === 0}
-                onClick={() => setPinnedPanelOpen((prev) => !prev)}
-              >
-                Pinned ({pinnedRows.size})
-              </Button>
-            </Popover.Target>
-            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '8px 12px',
-                  borderBottom: `1px solid ${theme.border}`,
-                  fontWeight: 600
-                }}
-              >
-                <span>Pinned ({pinnedRows.size})</span>
-                <button onClick={handleClearPinned} style={{ fontSize: 12, fontWeight: 400 }}>
-                  Clear all
-                </button>
-              </div>
-              <div style={{ overflowY: 'auto', flex: 1 }}>
-                {Array.from(pinnedRows.values()).map((row) => (
-                  <div
-                    key={row.path}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '6px 12px',
-                      borderBottom: `1px solid ${theme.border}`
-                    }}
-                  >
-                    <span
-                      style={{
-                        flex: 1,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
-                      }}
-                    >
-                      <FileTypeIcon row={row} size={14} />
-                      {row.name}
-                    </span>
-                    <button onClick={() => handleUnpin(row.path)} style={{ display: 'flex' }}>
-                      <IconX size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: '8px 12px', borderTop: `1px solid ${theme.border}` }}>
-                <button onClick={handleSelectPinned} style={{ width: '100%' }}>
-                  Select All Pinned
-                </button>
-              </div>
-            </Popover.Dropdown>
-          </Popover>
-        )}
-        {rootPath && settings && (
-          <Popover
-            opened={savedViewsPanelOpen}
-            onChange={setSavedViewsPanelOpen}
-            position="bottom-end"
-            width={300}
-            shadow="md"
-          >
-            <Popover.Target>
-              <Button variant="default" size="sm" onClick={() => setSavedViewsPanelOpen((prev) => !prev)}>
-                Views ({settings.savedViews.length})
-              </Button>
-            </Popover.Target>
-            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
-              <div
-                style={{
-                  padding: '8px 12px',
-                  borderBottom: `1px solid ${theme.border}`,
-                  fontWeight: 600
-                }}
-              >
-                <span>Saved Views ({settings.savedViews.length})</span>
-              </div>
-              <div style={{ overflowY: 'auto', flex: 1 }}>
-                {settings.savedViews.length === 0 && (
-                  <div style={{ padding: '10px 12px', color: theme.muted }}>No saved views yet.</div>
-                )}
-                {settings.savedViews.map((view) => (
-                  <div
-                    key={view.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '6px 12px',
-                      borderBottom: `1px solid ${theme.border}`
-                    }}
-                  >
-                    <button
-                      onClick={() => handleLoadView(view)}
-                      style={{
-                        flex: 1,
-                        textAlign: 'left',
-                        border: 'none',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap'
-                      }}
-                    >
-                      {view.name}
-                    </button>
-                    <button onClick={() => void handleDeleteView(view.id)} style={{ display: 'flex' }}>
-                      <IconX size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div style={{ padding: '8px 12px', borderTop: `1px solid ${theme.border}` }}>
-                <button onClick={handleOpenSaveView} style={{ width: '100%' }}>
-                  Save current view…
-                </button>
-              </div>
-            </Popover.Dropdown>
-          </Popover>
-        )}
-        {rootPath && (
-          <Popover opened={storagePanelOpen} onChange={setStoragePanelOpen} position="bottom-end" width={320} shadow="md">
-            <Popover.Target>
-              <Button
-                variant="default"
-                size="sm"
-                leftSection={<IconChartBar size={14} />}
-                onClick={() => setStoragePanelOpen((prev) => !prev)}
-              >
-                Storage
-              </Button>
-            </Popover.Target>
-            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
-              <div
-                style={{
-                  padding: '8px 12px',
-                  borderBottom: `1px solid ${theme.border}`,
-                  fontWeight: 600
-                }}
-              >
-                Storage by extension
-              </div>
-              <div style={{ overflowY: 'auto', flex: 1, padding: '8px 12px' }}>
-                {storageBreakdown.length === 0 && <div style={{ color: theme.muted }}>No files in view.</div>}
-                {storageBreakdown.map((entry) => {
-                  const maxBytes = storageBreakdown[0]?.totalSizeBytes || 1
-                  const barPercent = (entry.totalSizeBytes / maxBytes) * 100
-                  return (
-                    <div key={entry.ext || '(none)'} style={{ marginBottom: 8 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                        <span>
-                          {entry.ext ? `.${entry.ext}` : '(no extension)'} · {entry.count.toLocaleString()}
-                        </span>
-                        <span>{formatBytes(entry.totalSizeBytes)}</span>
-                      </div>
-                      <div style={{ background: theme.headerBg, borderRadius: 3, height: 8 }}>
-                        <div
-                          style={{
-                            background: theme.accent,
-                            borderRadius: 3,
-                            height: 8,
-                            width: `${barPercent}%`
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </Popover.Dropdown>
-          </Popover>
-        )}
-        <Button
-          variant="default"
-          size="sm"
-          leftSection={<IconSettings size={14} />}
-          onClick={handleOpenSettings}
-          style={{ marginLeft: 'auto' }}
-        >
-          Settings
-        </Button>
-        {scanning && (
-          <Button variant="default" size="sm" onClick={handleCancelScan}>
-            Cancel
-          </Button>
-        )}
-        {scanning && <Text size="sm">Scanning… {scanned} found</Text>}
-        {!scanning && rootPath && !error && <Text size="sm">{total} items</Text>}
-        {error && <Text size="sm" c="red">Error: {error}</Text>}
-        {health && !scanning && (
-          <Text size="xs" c="dimmed" style={{ marginLeft: 'auto' }}>
-            {health.fileCount.toLocaleString()} indexed · {formatBytes(health.dbSizeBytes)} cache ·{' '}
-            {health.lastScanAt ? `scanned ${new Date(health.lastScanAt).toLocaleTimeString()}` : 'not scanned yet'} ·{' '}
-            watcher {health.watcherActive ? 'active' : 'inactive'}
-          </Text>
-        )}
-      </Group>
+      <Toolbar
+        rootPath={rootPath}
+        currentDir={currentDir}
+        scanning={scanning}
+        scanned={scanned}
+        total={total}
+        error={error}
+        health={health}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        displayMode={displayMode}
+        setDisplayMode={setDisplayMode}
+        fileClipboard={fileClipboard}
+        undoStack={undoStack}
+        redoStack={redoStack}
+        selectedCount={selectedRows.length}
+        trashCount={trashCount}
+        pinnedPanelOpen={pinnedPanelOpen}
+        setPinnedPanelOpen={setPinnedPanelOpen}
+        pinnedRows={pinnedRows}
+        savedViewsPanelOpen={savedViewsPanelOpen}
+        setSavedViewsPanelOpen={setSavedViewsPanelOpen}
+        savedViews={settings?.savedViews ?? null}
+        storagePanelOpen={storagePanelOpen}
+        setStoragePanelOpen={setStoragePanelOpen}
+        storageBreakdown={storageBreakdown}
+        onPickRoot={() => void handlePickRoot()}
+        onRescan={() => void handleRescan()}
+        onCancelScan={() => void handleCancelScan()}
+        onNewFolder={() => void handleNewFolder()}
+        onPaste={(destDir) => void handlePaste(destDir)}
+        onUndo={() => void handleUndo()}
+        onRedo={() => void handleRedo()}
+        onDeleteClick={() => handleDeleteClick()}
+        onEmptyTrashClick={handleEmptyTrashClick}
+        onClearPinned={handleClearPinned}
+        onUnpin={handleUnpin}
+        onSelectPinned={handleSelectPinned}
+        onLoadView={handleLoadView}
+        onDeleteView={(id) => void handleDeleteView(id)}
+        onOpenSaveView={handleOpenSaveView}
+        onOpenSettings={handleOpenSettings}
+      />
       {scanning && (
         <div style={{ height: 3, overflow: 'hidden', background: theme.headerBg }}>
           <div
