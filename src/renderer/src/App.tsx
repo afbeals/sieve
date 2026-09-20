@@ -1,0 +1,2947 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Button,
+  Checkbox,
+  Group,
+  Loader,
+  Menu,
+  Modal,
+  NumberInput,
+  Popover,
+  SegmentedControl,
+  Select,
+  Stack,
+  Text,
+  TextInput,
+  useMantineColorScheme
+} from '@mantine/core'
+import {
+  GroupedVirtuoso,
+  TableVirtuoso,
+  VirtuosoGrid,
+  type GridItemProps,
+  type GroupedVirtuosoHandle,
+  type TableVirtuosoHandle,
+  type VirtuosoGridHandle
+} from 'react-virtuoso'
+import {
+  IconChartBar,
+  IconFile,
+  IconFileText,
+  IconFileZip,
+  IconFolder,
+  IconPhoto,
+  IconPin,
+  IconSettings,
+  IconVideo,
+  IconX,
+  type Icon as TablerIcon
+} from '@tabler/icons-react'
+import { tokenizeFileName } from '../../shared/tokenize'
+import { getMediaKind } from '../../shared/media'
+import './gallery.css'
+import type {
+  AppSettings,
+  FileRow,
+  FilterCombinator,
+  FilterMode,
+  FilterRule,
+  IndexHealth,
+  ListingAggregate,
+  ListingScope,
+  PathMapping,
+  PatternHistoryEntry,
+  QuickFilters,
+  SavedView,
+  SortDir,
+  SortField,
+  StorageBreakdownEntry,
+  ThumbnailFramePreview,
+  WordFrequencyEntry
+} from '../../shared/types'
+
+const SORT_COLUMNS: { field: SortField; label: string; align: 'left' | 'right' }[] = [
+  { field: 'name', label: 'Name', align: 'left' },
+  { field: 'size', label: 'Size', align: 'right' },
+  { field: 'mtimeMs', label: 'Modified', align: 'left' },
+  { field: 'ctimeMs', label: 'Created', align: 'left' }
+]
+
+// Persistent layout (#32): fallback widths for a fresh session / older settings file that
+// predates a given column key.
+const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
+  name: 320,
+  size: 110,
+  mtimeMs: 170,
+  ctimeMs: 170
+}
+
+// Real Mantine CSS variables (set by MantineProvider, and re-resolved automatically whenever
+// the color scheme changes - no light/dark JS branch needed) instead of a hand-rolled palette,
+// so every custom-styled element below stays in sync with Mantine's own light/dark tokens.
+const theme = {
+  bg: 'var(--mantine-color-body)',
+  fg: 'var(--mantine-color-text)',
+  muted: 'var(--mantine-color-dimmed)',
+  border: 'var(--mantine-color-default-border)',
+  headerBg: 'var(--mantine-color-default)',
+  selectedBg: 'var(--mantine-primary-color-light)',
+  selectedBorder: 'var(--mantine-primary-color-filled)',
+  dragOverBg: 'var(--mantine-color-green-light)',
+  dragOverBorder: 'var(--mantine-color-green-filled)',
+  chipBg: 'var(--mantine-color-default)',
+  chipBorder: 'var(--mantine-color-default-border)',
+  pillBg: 'var(--mantine-color-blue-light)',
+  pillText: 'var(--mantine-color-blue-light-color)',
+  accent: 'var(--mantine-primary-color-filled)',
+  accentText: 'var(--mantine-primary-color-contrast)',
+  dangerText: 'var(--mantine-color-error)',
+  errorBg: 'var(--mantine-color-red-light)',
+  errorText: 'var(--mantine-color-red-light-color)'
+}
+
+const EXTENSION_GROUPS: { label: string; extensions: string[]; icon: TablerIcon }[] = [
+  { label: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg'], icon: IconPhoto },
+  { label: 'Videos', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'], icon: IconVideo },
+  { label: 'Documents', extensions: ['pdf', 'doc', 'docx', 'txt', 'md', 'rtf'], icon: IconFileText },
+  { label: 'Archives', extensions: ['zip', 'rar', '7z', 'tar', 'gz'], icon: IconFileZip }
+]
+
+function getFileIcon(row: FileRow): TablerIcon {
+  if (row.isDirectory) return IconFolder
+  return EXTENSION_GROUPS.find((group) => group.extensions.includes(row.ext))?.icon ?? IconFile
+}
+
+function FileTypeIcon({ row, size = 16 }: { row: FileRow; size?: number }): React.JSX.Element {
+  const Icon = getFileIcon(row)
+  return <Icon size={size} style={{ verticalAlign: 'middle', flexShrink: 0 }} />
+}
+
+// Row-icon-as-thumbnail: a plain module-level cache (not React state) since it's a rendering
+// cache shared across every row/component instance, not app state - once a path's icon is
+// fetched, every future mount of that row (e.g. scrolling back into a virtualized view) reads
+// it synchronously instead of re-fetching. `undefined` = not yet fetched, `null` = fetched but
+// no thumbnail exists (falls back to the Tabler file-type icon).
+const thumbnailIconCache = new Map<string, string | null>()
+
+function useThumbnailIcon(row: FileRow): string | null {
+  const mediaKind = row.isDirectory ? null : getMediaKind(row.ext)
+  const [iconUrl, setIconUrl] = useState<string | null>(() => (mediaKind ? thumbnailIconCache.get(row.path) ?? null : null))
+  useEffect(() => {
+    if (!mediaKind) return
+    const cached = thumbnailIconCache.get(row.path)
+    if (cached !== undefined) {
+      setIconUrl(cached)
+      return
+    }
+    let cancelled = false
+    void window.api.getThumbnailIcon(row.path).then((url) => {
+      thumbnailIconCache.set(row.path, url)
+      if (!cancelled) setIconUrl(url)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [row.path, mediaKind])
+  return iconUrl
+}
+
+// `fill` renders the image to completely cover its container (the gallery grid's square tile);
+// otherwise it's a small inline square next to the file name (table/grouped-list rows),
+// matching the fallback icon's footprint via `size`.
+function RowIcon({ row, size, fill }: { row: FileRow; size: number; fill?: boolean }): React.JSX.Element {
+  const iconUrl = useThumbnailIcon(row)
+  if (iconUrl) {
+    return (
+      <img
+        src={iconUrl}
+        alt=""
+        style={
+          fill
+            ? { width: '100%', height: '100%', objectFit: 'cover' }
+            : { width: size, height: size, objectFit: 'cover', borderRadius: 3, verticalAlign: 'middle' }
+        }
+      />
+    )
+  }
+  return <FileTypeIcon row={row} size={size} />
+}
+
+function getTypeLabel(row: FileRow): string {
+  if (row.isDirectory) return 'Folder'
+  return row.ext ? `${row.ext.toUpperCase()} file` : 'File'
+}
+
+const SIZE_PRESETS: { label: string; minSizeBytes: number }[] = [
+  { label: '≥100MB', minSizeBytes: 100 * 1024 * 1024 },
+  { label: '≥1GB', minSizeBytes: 1024 * 1024 * 1024 }
+]
+
+const DATE_PRESETS: { label: string; withinMs: number }[] = [
+  { label: 'Today', withinMs: 24 * 60 * 60 * 1000 },
+  { label: 'This week', withinMs: 7 * 24 * 60 * 60 * 1000 },
+  { label: 'This month', withinMs: 30 * 24 * 60 * 60 * 1000 }
+]
+
+const PAGE_SIZE = 200
+
+interface StackEntry {
+  path: string
+  label: string
+}
+
+type GalleryEntry =
+  | { kind: 'divider'; label: string; count: number; totalSizeBytes: number }
+  | { kind: 'row'; row: FileRow }
+
+interface PreviewSlot {
+  row: FileRow
+  frames: ThumbnailFramePreview[]
+  animatedUrl: string | null
+  carouselIndex: number
+}
+
+type FileAction =
+  | { type: 'newFolder'; path: string }
+  | { type: 'rename'; oldPath: string; newPath: string }
+  | { type: 'bulkRename'; renames: PathMapping[] }
+  | { type: 'move'; moves: PathMapping[] }
+  | { type: 'copy'; created: PathMapping[] }
+  | { type: 'duplicate'; created: PathMapping[] }
+  | { type: 'delete'; deletions: PathMapping[] }
+
+function basenameFallback(path: string): string {
+  const segments = path.split(/[/\\]/).filter(Boolean)
+  return segments[segments.length - 1] ?? path
+}
+
+// No node:path in the renderer (contextIsolation with no nodeIntegration) - this only needs
+// to strip the last real separator that's actually present in an absolute path already
+// produced by the main process, not to be a general-purpose path utility.
+function dirnameFallback(path: string): string {
+  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return separatorIndex === -1 ? path : path.slice(0, separatorIndex)
+}
+
+function describeFileAction(action: FileAction): string {
+  switch (action.type) {
+    case 'newFolder':
+      return `New Folder "${basenameFallback(action.path)}"`
+    case 'rename':
+      return `Rename to "${basenameFallback(action.newPath)}"`
+    case 'bulkRename':
+      return `Bulk Rename (${action.renames.length} item${action.renames.length === 1 ? '' : 's'})`
+    case 'move':
+      return `Move (${action.moves.length} item${action.moves.length === 1 ? '' : 's'})`
+    case 'copy':
+      return `Copy (${action.created.length} item${action.created.length === 1 ? '' : 's'})`
+    case 'duplicate':
+      return `Duplicate (${action.created.length} item${action.created.length === 1 ? '' : 's'})`
+    case 'delete':
+      return `Delete (${action.deletions.length} item${action.deletions.length === 1 ? '' : 's'})`
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`
+}
+
+export default function App(): React.JSX.Element {
+  const [rootPath, setRootPath] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<'recursive' | 'folder'>('recursive')
+  const [displayMode, setDisplayMode] = useState<'table' | 'gallery'>('table')
+  const [pathStack, setPathStack] = useState<StackEntry[]>([])
+  const [rows, setRows] = useState<FileRow[]>([])
+  const [total, setTotal] = useState(0)
+  const [scanned, setScanned] = useState(0)
+  const [scanning, setScanning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [health, setHealth] = useState<IndexHealth | null>(null)
+  const [sortField, setSortField] = useState<SortField>('name')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [filterRules, setFilterRules] = useState<FilterRule[]>([])
+  const [draftPattern, setDraftPattern] = useState('')
+  const [draftMode, setDraftMode] = useState<FilterMode>('fuzzy')
+  const [draftInvert, setDraftInvert] = useState(false)
+  const [draftCombinator, setDraftCombinator] = useState<FilterCombinator>('AND')
+  const [previewCount, setPreviewCount] = useState<number | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [activeExtensionGroups, setActiveExtensionGroups] = useState<Set<string>>(new Set())
+  const [activeSizePreset, setActiveSizePreset] = useState<string | null>(null)
+  const [activeDatePreset, setActiveDatePreset] = useState<string | null>(null)
+  const [patternHistory, setPatternHistory] = useState<PatternHistoryEntry[]>([])
+  const [wordFrequency, setWordFrequency] = useState<WordFrequencyEntry[]>([])
+  const [analyzingWords, setAnalyzingWords] = useState(false)
+  const [groupWords, setGroupWords] = useState<string[]>([])
+  const [groupedRows, setGroupedRows] = useState<FileRow[]>([])
+  const [groupedLoading, setGroupedLoading] = useState(false)
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [aggregate, setAggregate] = useState<ListingAggregate | null>(null)
+  const [selectedRows, setSelectedRows] = useState<FileRow[]>([])
+  const selectedPathsRef = useRef('')
+  selectedPathsRef.current = selectedRows.map((row) => row.path).join('|')
+  const [previewSlots, setPreviewSlots] = useState<PreviewSlot[]>([])
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
+  const [thumbnailProgress, setThumbnailProgress] = useState<{ processed: number; total: number } | null>(null)
+  const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut' } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: FileRow | null } | null>(null)
+  const [renamingPath, setRenamingPath] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
+  const [bulkRenameOpen, setBulkRenameOpen] = useState(false)
+  const [bulkRenameDraft, setBulkRenameDraft] = useState('')
+  const [fileOpError, setFileOpError] = useState<string | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string
+    message: string
+    confirmLabel: string
+    onConfirm: () => void
+  } | null>(null)
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null)
+  const [undoStack, setUndoStack] = useState<FileAction[]>([])
+  const [redoStack, setRedoStack] = useState<FileAction[]>([])
+  const [trashCount, setTrashCount] = useState(0)
+  // Pinned "working set" (#26): survives filter/grouping/view-mode changes on purpose, so a
+  // multi-pass triage (filter -> pin a few -> change filter -> pin a few more -> ...) can end
+  // with one "Select All Pinned" that loads the whole set into selectedRows for a single bulk
+  // action. Stores the FileRow snapshot, not just the path, since a pinned file may be
+  // filtered out of `rows` entirely by the time it's acted on.
+  const [pinnedRows, setPinnedRows] = useState<Map<string, FileRow>>(new Map())
+  const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false)
+  const [settings, setSettings] = useState<AppSettings | null>(null)
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null)
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
+  const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
+  const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
+  const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_COLUMN_WIDTHS)
+  const [activeResizeColumn, setActiveResizeColumn] = useState<string | null>(null)
+  const [hoveredResizeColumn, setHoveredResizeColumn] = useState<string | null>(null)
+  const [storageBreakdown, setStorageBreakdown] = useState<StorageBreakdownEntry[]>([])
+  const [storagePanelOpen, setStoragePanelOpen] = useState(false)
+  const settingsLoadedRef = useRef(false)
+  const loadingMore = useRef(false)
+  const groupedVirtuosoRef = useRef<GroupedVirtuosoHandle>(null)
+  const tableVirtuosoRef = useRef<TableVirtuosoHandle>(null)
+  const galleryVirtuosoRef = useRef<VirtuosoGridHandle>(null)
+  const galleryDataRef = useRef<GalleryEntry[]>([])
+
+  const quickFilters = useMemo<QuickFilters>(() => {
+    const extensions = EXTENSION_GROUPS.filter((group) => activeExtensionGroups.has(group.label)).flatMap(
+      (group) => group.extensions
+    )
+    const sizePreset = SIZE_PRESETS.find((preset) => preset.label === activeSizePreset)
+    const datePreset = DATE_PRESETS.find((preset) => preset.label === activeDatePreset)
+    return {
+      extensions,
+      minSizeBytes: sizePreset?.minSizeBytes,
+      modifiedAfterMs: datePreset ? Date.now() - datePreset.withinMs : undefined
+    }
+  }, [activeExtensionGroups, activeSizePreset, activeDatePreset])
+
+  // Settings apply as initial defaults for a fresh session (sort/view mode), not retroactively
+  // to whatever the user has already changed mid-session - loaded once on mount.
+  useEffect(() => {
+    void (async () => {
+      const loaded = await window.api.getSettings()
+      setSettings(loaded)
+      setSortField(loaded.defaultSortField)
+      setSortDir(loaded.defaultSortDir)
+      setDisplayMode(loaded.defaultViewMode)
+      setColumnWidths({ ...DEFAULT_COLUMN_WIDTHS, ...loaded.columnWidths })
+      settingsLoadedRef.current = true
+    })()
+  }, [])
+
+  // Persistent layout (#32): auto-saves whenever the user changes sort/view mode or drags a
+  // column wider/narrower, independent of the manual Settings panel save. Debounced so a
+  // column drag (many rapid width changes) doesn't write to disk on every pixel. Gated on
+  // settingsLoadedRef so this doesn't fire (and overwrite the just-loaded file with fresh-
+  // session defaults) before the initial load above has actually applied.
+  useEffect(() => {
+    if (!settingsLoadedRef.current) return
+    const timer = setTimeout(() => {
+      void window.api.updateSettings({
+        defaultSortField: sortField,
+        defaultSortDir: sortDir,
+        defaultViewMode: displayMode,
+        columnWidths
+      })
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [sortField, sortDir, displayMode, columnWidths])
+
+  // Theme toggle (#36): Mantine's own color-scheme system (wired up in main.tsx's
+  // MantineProvider) now owns OS-preference tracking and, critically, sets the `color-scheme`
+  // CSS property at the root - which is what makes native <button>/<input>/<select> elements
+  // actually render with dark chrome instead of staying white ("white spots" the user found).
+  // We just sync our persisted `settings.theme` ('system' maps to Mantine's 'auto') into it. Our
+  // own custom-styled elements read Mantine's CSS variables directly (see the module-level
+  // `theme` object below), so they switch with the color scheme automatically with no JS branch.
+  const { setColorScheme } = useMantineColorScheme()
+  useEffect(() => {
+    if (!settings) return
+    setColorScheme(settings.theme === 'system' ? 'auto' : settings.theme)
+  }, [settings?.theme, setColorScheme])
+
+  const currentDir = pathStack[pathStack.length - 1]?.path ?? rootPath
+
+  const buildScope = useCallback(
+    (dir: string | null): ListingScope | null => (dir ? { mode: viewMode, dirPath: dir } : null),
+    [viewMode]
+  )
+
+  const loadPage = useCallback(
+    async (scope: ListingScope, offset: number, append: boolean): Promise<void> => {
+      const result = await window.api.queryListing({
+        scope,
+        filterRules,
+        quickFilters,
+        sortField,
+        sortDir,
+        limit: PAGE_SIZE,
+        offset
+      })
+      setTotal(result.total)
+      setRows((prev) => (append ? [...prev, ...result.rows] : result.rows))
+    },
+    [sortField, sortDir, filterRules, quickFilters]
+  )
+
+  const reload = useCallback((): void => {
+    const scope = buildScope(currentDir)
+    if (!scope) return
+    setRows([])
+    void loadPage(scope, 0, false)
+  }, [buildScope, currentDir, loadPage])
+
+  const refreshHealth = useCallback(async (root: string): Promise<void> => {
+    const result = await window.api.getIndexHealth(root)
+    setHealth(result)
+  }, [])
+
+  const refreshTrashCount = useCallback(async (root: string): Promise<void> => {
+    setTrashCount(await window.api.getTrashCount(root))
+  }, [])
+
+  const loadGroupedRows = useCallback(async (): Promise<void> => {
+    const scope = buildScope(currentDir)
+    if (!scope || groupWords.length === 0) {
+      setGroupedRows([])
+      return
+    }
+    setGroupedLoading(true)
+    try {
+      const allRows = await window.api.queryAllMatching({
+        scope,
+        filterRules,
+        quickFilters,
+        sortField,
+        sortDir,
+        limit: 0,
+        offset: 0
+      })
+      setGroupedRows(allRows)
+    } finally {
+      setGroupedLoading(false)
+    }
+  }, [buildScope, currentDir, groupWords, filterRules, quickFilters, sortField, sortDir])
+
+  useEffect(() => {
+    void loadGroupedRows()
+  }, [loadGroupedRows])
+
+  const loadAggregate = useCallback(async (): Promise<void> => {
+    const scope = buildScope(currentDir)
+    if (!scope) {
+      setAggregate(null)
+      return
+    }
+    try {
+      const result = await window.api.getListingAggregate({ scope, filterRules, quickFilters })
+      setAggregate(result)
+    } catch (err) {
+      console.error('Failed to load listing aggregate', err)
+    }
+  }, [buildScope, currentDir, filterRules, quickFilters])
+
+  // Storage breakdown (#33): only fetched while its panel is open - it's a diagnostic view,
+  // not something the whole-view status bar (which uses loadAggregate above) needs on every
+  // keystroke.
+  const loadStorageBreakdown = useCallback(async (): Promise<void> => {
+    if (!storagePanelOpen) return
+    const scope = buildScope(currentDir)
+    if (!scope) {
+      setStorageBreakdown([])
+      return
+    }
+    try {
+      const result = await window.api.getStorageBreakdown({ scope, filterRules, quickFilters })
+      setStorageBreakdown(result)
+    } catch (err) {
+      console.error('Failed to load storage breakdown', err)
+    }
+  }, [storagePanelOpen, buildScope, currentDir, filterRules, quickFilters])
+
+  useEffect(() => {
+    void loadStorageBreakdown()
+  }, [loadStorageBreakdown])
+
+  // Manual double-click detection (click timestamps) instead of the native `dblclick` event:
+  // every row is `draggable` for drag-to-move, and Chromium's drag-vs-click disambiguation on
+  // the second mousedown of a fast double-click can swallow the synthetic `dblclick` entirely,
+  // even though the plain `click` events themselves still fire fine. Confirmed live - the
+  // right-click "Open" menu item (same handleRowActivate call) worked, but `onDoubleClick` on
+  // the row never fired at all.
+  const lastRowClickRef = useRef<{ path: string; time: number } | null>(null)
+
+  const handleSelectRow = (row: FileRow, event: React.MouseEvent): void => {
+    const now = Date.now()
+    const last = lastRowClickRef.current
+    lastRowClickRef.current = { path: row.path, time: now }
+    if (last && last.path === row.path && now - last.time < 400) {
+      lastRowClickRef.current = null
+      handleRowActivate(row)
+      return
+    }
+    const toggle = event.metaKey || event.ctrlKey
+    setSelectedRows((prev) => {
+      if (!toggle) return [row]
+      const alreadySelected = prev.some((r) => r.path === row.path)
+      return alreadySelected ? prev.filter((r) => r.path !== row.path) : [...prev, row]
+    })
+  }
+
+  const loadPreviewSlots = useCallback(async (): Promise<void> => {
+    const signature = selectedRows.map((row) => row.path).join('|')
+    if (selectedRows.length === 0 || selectedRows.length > 2) {
+      setPreviewSlots([])
+      return
+    }
+    const slots = await Promise.all(
+      selectedRows.map(async (row): Promise<PreviewSlot> => {
+        if (row.isDirectory) return { row, frames: [], animatedUrl: null, carouselIndex: 0 }
+        const frames = await window.api.getThumbnails(row.path)
+        const animatedUrl = row.ext === 'gif' ? await window.api.getOriginalMedia(row.path) : null
+        return { row, frames, animatedUrl, carouselIndex: 0 }
+      })
+    )
+    if (selectedPathsRef.current !== signature) return
+    setPreviewSlots(slots)
+  }, [selectedRows])
+
+  useEffect(() => {
+    void loadPreviewSlots()
+  }, [loadPreviewSlots])
+
+  useEffect(() => {
+    if (!lightboxUrl) return
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setLightboxUrl(null)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [lightboxUrl])
+
+  // Context menu (Menu) and the Pinned/Views/Storage panels (Popover) handle their own
+  // click-outside and Escape-to-close behavior - no manual window listeners needed for them.
+  useEffect(() => {
+    if (!renamingPath && !bulkRenameOpen && !settingsPanelOpen && !saveViewDraftOpen) return
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      setRenamingPath(null)
+      setBulkRenameOpen(false)
+      setSettingsPanelOpen(false)
+      setSaveViewDraftOpen(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [renamingPath, bulkRenameOpen, settingsPanelOpen, saveViewDraftOpen])
+
+  useEffect(() => {
+    void loadAggregate()
+  }, [loadAggregate])
+
+  const groups = useMemo(() => {
+    if (groupWords.length === 0) return []
+    const buckets = new Map<string, FileRow[]>(groupWords.map((word) => [word, []]))
+    const other: FileRow[] = []
+    for (const row of groupedRows) {
+      const tokens = tokenizeFileName(row.name)
+      const match = groupWords.find((word) => tokens.includes(word))
+      if (match) buckets.get(match)?.push(row)
+      else other.push(row)
+    }
+    return [
+      ...groupWords.map((word) => ({ label: word, rows: buckets.get(word) ?? [] })),
+      { label: 'Other', rows: other }
+    ].filter((group) => group.rows.length > 0)
+  }, [groupWords, groupedRows])
+
+  const groupFlatRows = useMemo(
+    () => groups.flatMap((group) => (collapsedGroups.has(group.label) ? [] : group.rows)),
+    [groups, collapsedGroups]
+  )
+  const groupCounts = useMemo(
+    () => groups.map((group) => (collapsedGroups.has(group.label) ? 0 : group.rows.length)),
+    [groups, collapsedGroups]
+  )
+
+  const galleryData = useMemo<GalleryEntry[]>(() => {
+    if (groupWords.length === 0) return rows.map((row) => ({ kind: 'row', row }))
+    const entries: GalleryEntry[] = []
+    for (const group of groups) {
+      const totalSizeBytes = group.rows.reduce((sum, row) => (row.isDirectory ? sum : sum + row.size), 0)
+      entries.push({ kind: 'divider', label: group.label, count: group.rows.length, totalSizeBytes })
+      if (!collapsedGroups.has(group.label)) {
+        for (const row of group.rows) entries.push({ kind: 'row', row })
+      }
+    }
+    return entries
+  }, [groupWords, groups, collapsedGroups, rows])
+  galleryDataRef.current = galleryData
+
+  const galleryGroupOffsets = useMemo(() => {
+    if (groupWords.length === 0) return []
+    const offsets: number[] = []
+    let cursor = 0
+    for (const group of groups) {
+      offsets.push(cursor)
+      cursor += 1 + (collapsedGroups.has(group.label) ? 0 : group.rows.length)
+    }
+    return offsets
+  }, [groupWords, groups, collapsedGroups])
+
+  const visibleOrderedRows = useMemo<FileRow[]>(() => {
+    if (displayMode === 'gallery') {
+      return galleryData.flatMap((entry) => (entry.kind === 'row' ? [entry.row] : []))
+    }
+    return groupWords.length > 0 ? groupFlatRows : rows
+  }, [displayMode, galleryData, groupWords, groupFlatRows, rows])
+
+  const scrollRowIntoView = (row: FileRow, flatIndex: number): void => {
+    if (displayMode === 'gallery') {
+      const galleryIndex = galleryData.findIndex((entry) => entry.kind === 'row' && entry.row.path === row.path)
+      if (galleryIndex >= 0) galleryVirtuosoRef.current?.scrollToIndex({ index: galleryIndex, align: 'center' })
+    } else if (groupWords.length > 0) {
+      groupedVirtuosoRef.current?.scrollToIndex({ index: flatIndex, align: 'center' })
+    } else {
+      tableVirtuosoRef.current?.scrollToIndex({ index: flatIndex, align: 'center' })
+    }
+  }
+
+  // Arrow-key navigation moves the live preview (#18): it always replaces the selection with a
+  // single neighboring row (never extends a multi-select) so the preview panel has one clear
+  // "current" row to follow, mirroring Finder/Explorer's arrow-key + Quick Look behavior.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      if (visibleOrderedRows.length === 0) return
+      event.preventDefault()
+      const lastSelected = selectedRows[selectedRows.length - 1]
+      const currentIndex = lastSelected
+        ? visibleOrderedRows.findIndex((row) => row.path === lastSelected.path)
+        : -1
+      const delta = event.key === 'ArrowDown' ? 1 : -1
+      const nextIndex = Math.min(Math.max(currentIndex + delta, 0), visibleOrderedRows.length - 1)
+      const nextRow = visibleOrderedRows[nextIndex]
+      setSelectedRows([nextRow])
+      scrollRowIntoView(nextRow, nextIndex)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [visibleOrderedRows, selectedRows, displayMode, groupWords, galleryData])
+
+  function renderNameText(row: FileRow): React.JSX.Element {
+    if (renamingPath !== row.path) return <>{row.name}</>
+    return (
+      <input
+        autoFocus
+        value={renameDraft}
+        onChange={(event) => setRenameDraft(event.target.value)}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') void handleCommitRename()
+          if (event.key === 'Escape') handleCancelRename()
+        }}
+        onBlur={() => void handleCommitRename()}
+        style={{ font: 'inherit', width: '90%' }}
+      />
+    )
+  }
+
+  const GalleryItem = useMemo(() => {
+    function GalleryItemComponent({ children, className, style, ...rest }: GridItemProps): React.JSX.Element {
+      const entry = galleryDataRef.current[rest['data-index']]
+      const isDivider = entry?.kind === 'divider'
+      return (
+        <div {...rest} className={className} style={isDivider ? { ...style, gridColumn: '1 / -1' } : style}>
+          {children}
+        </div>
+      )
+    }
+    return GalleryItemComponent
+  }, [])
+
+  const handleJumpToGroup = (groupIndex: number): void => {
+    if (displayMode === 'gallery') {
+      const offset = galleryGroupOffsets[groupIndex] ?? 0
+      galleryVirtuosoRef.current?.scrollToIndex({ index: offset, align: 'start' })
+      return
+    }
+    const offset = groupCounts.slice(0, groupIndex).reduce((sum, count) => sum + count, 0)
+    groupedVirtuosoRef.current?.scrollToIndex({ index: offset, align: 'start' })
+  }
+
+  const handleToggleGroupCollapse = (label: string): void => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      return next
+    })
+  }
+
+  useEffect(() => {
+    reload()
+  }, [reload])
+
+  useEffect(() => {
+    const unsubscribeProgress = window.api.onScanProgress((payload) => {
+      if (payload.rootPath === rootPath) setScanned(payload.scanned)
+    })
+    const unsubscribeDone = window.api.onScanDone((payload) => {
+      if (payload.rootPath !== rootPath) return
+      setScanning(false)
+      reload()
+      void refreshHealth(payload.rootPath)
+      void refreshTrashCount(payload.rootPath)
+      void loadAggregate()
+      void loadStorageBreakdown()
+    })
+    const unsubscribeError = window.api.onScanError((payload) => {
+      if (payload.rootPath !== rootPath) return
+      setScanning(false)
+      setError(payload.error)
+    })
+    const unsubscribeChanged = window.api.onWatchChanged((payload) => {
+      if (payload.rootPath !== rootPath) return
+      reload()
+      void refreshHealth(payload.rootPath)
+      void loadAggregate()
+      void loadStorageBreakdown()
+    })
+    const unsubscribeThumbProgress = window.api.onThumbnailProgress((payload) => {
+      if (payload.rootPath !== rootPath) return
+      setThumbnailProgress({ processed: payload.processed, total: payload.total })
+    })
+    const unsubscribeThumbDone = window.api.onThumbnailDone((payload) => {
+      if (payload.rootPath !== rootPath) return
+      setThumbnailProgress(null)
+    })
+    const unsubscribeThumbReady = window.api.onThumbnailFileReady((payload) => {
+      if (selectedRows.some((row) => row.path === payload.path)) void loadPreviewSlots()
+    })
+    return () => {
+      unsubscribeProgress()
+      unsubscribeDone()
+      unsubscribeError()
+      unsubscribeChanged()
+      unsubscribeThumbProgress()
+      unsubscribeThumbDone()
+      unsubscribeThumbReady()
+    }
+  }, [
+    rootPath,
+    reload,
+    refreshHealth,
+    refreshTrashCount,
+    loadAggregate,
+    loadStorageBreakdown,
+    selectedRows,
+    loadPreviewSlots
+  ])
+
+  const handlePickRoot = async (): Promise<void> => {
+    const picked = await window.api.pickRoot()
+    if (!picked) return
+    setError(null)
+    setRootPath(picked)
+    setPathStack([{ path: picked, label: basenameFallback(picked) }])
+    setRows([])
+    setTotal(0)
+    setScanned(0)
+    setHealth(null)
+    setScanning(true)
+    setPinnedRows(new Map())
+    setSelectedRows([])
+    setUndoStack([])
+    setRedoStack([])
+    await window.api.startScan(picked)
+  }
+
+  const handleRescan = async (): Promise<void> => {
+    if (!rootPath || scanning) return
+    setError(null)
+    setScanned(0)
+    setScanning(true)
+    await window.api.startScan(rootPath)
+  }
+
+  const handleCancelScan = async (): Promise<void> => {
+    await window.api.cancelScan()
+  }
+
+  const handleEndReached = (): void => {
+    const scope = buildScope(currentDir)
+    if (loadingMore.current || !scope) return
+    if (rows.length >= total) return
+    loadingMore.current = true
+    loadPage(scope, rows.length, true).finally(() => {
+      loadingMore.current = false
+    })
+  }
+
+  const handleRowActivate = (row: FileRow): void => {
+    if (row.isDirectory) {
+      setPathStack((prev) => [...prev, { path: row.path, label: row.name }])
+      return
+    }
+    void window.api.openPath(row.path).then((result) => {
+      if (result) setFileOpError(result)
+    })
+  }
+
+  // File operations only perform the raw fs mutation via IPC; they never touch `rows`/DB state
+  // directly. The already-running filesystem watcher (main/index.ts) sees the same add/unlink
+  // events it would for an external change and updates the index, which flows back here via
+  // the existing `watch:changed` -> reload() pipeline. The explicit reload() calls below are
+  // just an optimistic nudge for snappier feedback; they are not the source of truth.
+  const handleContextMenu = (event: React.MouseEvent, row: FileRow | null): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (row && !selectedRows.some((r) => r.path === row.path)) setSelectedRows([row])
+    setContextMenu({ x: event.clientX, y: event.clientY, row })
+  }
+
+  const handleStartRename = (row: FileRow): void => {
+    setContextMenu(null)
+    setRenamingPath(row.path)
+    setRenameDraft(row.name)
+  }
+
+  const handleCancelRename = (): void => {
+    setRenamingPath(null)
+  }
+
+  const pushAction = (action: FileAction): void => {
+    setUndoStack((prev) => [...prev, action])
+    setRedoStack([])
+  }
+
+  const handleCommitRename = async (): Promise<void> => {
+    const path = renamingPath
+    const draft = renameDraft.trim()
+    setRenamingPath(null)
+    if (!path || !draft) return
+    try {
+      const newPath = await window.api.renamePath(path, draft)
+      if (newPath !== path) pushAction({ type: 'rename', oldPath: path, newPath })
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Rename failed')
+    }
+  }
+
+  function baseNameWithoutExt(row: FileRow): string {
+    if (row.isDirectory || !row.ext) return row.name
+    return row.name.slice(0, row.name.length - row.ext.length - 1)
+  }
+
+  const handleStartBulkRename = (): void => {
+    setContextMenu(null)
+    if (selectedRows.length < 2) return
+    setBulkRenameDraft(baseNameWithoutExt(selectedRows[0]))
+    setBulkRenameOpen(true)
+  }
+
+  const handleCancelBulkRename = (): void => {
+    setBulkRenameOpen(false)
+  }
+
+  const handleCommitBulkRename = async (): Promise<void> => {
+    const draft = bulkRenameDraft.trim()
+    const paths = selectedRows.map((row) => row.path)
+    setBulkRenameOpen(false)
+    if (!draft || paths.length === 0) return
+    try {
+      const renames = await window.api.bulkRename(paths, draft)
+      pushAction({ type: 'bulkRename', renames })
+      setSelectedRows([])
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Bulk rename failed')
+    }
+  }
+
+  const handleNewFolder = async (): Promise<void> => {
+    setContextMenu(null)
+    if (!currentDir) return
+    try {
+      const path = await window.api.newFolder(currentDir)
+      pushAction({ type: 'newFolder', path })
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Could not create folder')
+    }
+  }
+
+  const handleCut = (): void => {
+    setContextMenu(null)
+    if (selectedRows.length === 0) return
+    setFileClipboard({ paths: selectedRows.map((row) => row.path), mode: 'cut' })
+  }
+
+  const handleCopy = (): void => {
+    setContextMenu(null)
+    if (selectedRows.length === 0) return
+    setFileClipboard({ paths: selectedRows.map((row) => row.path), mode: 'copy' })
+  }
+
+  const handlePaste = async (destDir: string): Promise<void> => {
+    setContextMenu(null)
+    if (!fileClipboard) return
+    try {
+      if (fileClipboard.mode === 'cut') {
+        const moves = await window.api.movePaths(fileClipboard.paths, destDir)
+        if (moves.length > 0) pushAction({ type: 'move', moves })
+        setFileClipboard(null)
+      } else {
+        const created = await window.api.copyPaths(fileClipboard.paths, destDir)
+        if (created.length > 0) pushAction({ type: 'copy', created })
+      }
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Paste failed')
+    }
+  }
+
+  const handleDuplicate = async (): Promise<void> => {
+    setContextMenu(null)
+    if (selectedRows.length === 0) return
+    try {
+      const created = await window.api.duplicatePaths(selectedRows.map((row) => row.path))
+      if (created.length > 0) pushAction({ type: 'duplicate', created })
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Duplicate failed')
+    }
+  }
+
+  const handleCopyPath = async (): Promise<void> => {
+    setContextMenu(null)
+    if (selectedRows.length === 0) return
+    await window.api.copyPathsToClipboard(selectedRows.map((row) => row.path))
+  }
+
+  const handleRevealInFolder = async (row: FileRow): Promise<void> => {
+    setContextMenu(null)
+    await window.api.revealInFolder(row.path)
+  }
+
+  const allSelectedPinned = selectedRows.length > 0 && selectedRows.every((row) => pinnedRows.has(row.path))
+
+  const handleTogglePinSelected = (): void => {
+    setContextMenu(null)
+    setPinnedRows((prev) => {
+      const next = new Map(prev)
+      for (const row of selectedRows) {
+        if (allSelectedPinned) next.delete(row.path)
+        else next.set(row.path, row)
+      }
+      return next
+    })
+  }
+
+  const handleUnpin = (path: string): void => {
+    setPinnedRows((prev) => {
+      const next = new Map(prev)
+      next.delete(path)
+      return next
+    })
+  }
+
+  const handleSelectPinned = (): void => {
+    setSelectedRows(Array.from(pinnedRows.values()))
+    setPinnedPanelOpen(false)
+  }
+
+  const handleClearPinned = (): void => {
+    setPinnedRows(new Map())
+  }
+
+  const handleOpenSettings = (): void => {
+    if (settings) setSettingsDraft(settings)
+    setSettingsPanelOpen(true)
+  }
+
+  const handleCancelSettings = (): void => {
+    setSettingsPanelOpen(false)
+  }
+
+  const handleSaveSettings = async (): Promise<void> => {
+    if (!settingsDraft) return
+    const saved = await window.api.updateSettings(settingsDraft)
+    setSettings(saved)
+    setSettingsPanelOpen(false)
+  }
+
+  const handleExportConfig = async (): Promise<void> => {
+    await window.api.exportConfig()
+  }
+
+  const handleImportConfig = async (): Promise<void> => {
+    try {
+      const imported = await window.api.importConfig()
+      if (imported) {
+        setSettings(imported)
+        setSettingsDraft(imported)
+      }
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Import failed')
+    }
+  }
+
+  const handleOpenSaveView = (): void => {
+    setSaveViewNameDraft('')
+    setSaveViewDraftOpen(true)
+    setSavedViewsPanelOpen(false)
+  }
+
+  const handleCancelSaveView = (): void => {
+    setSaveViewDraftOpen(false)
+  }
+
+  const handleCommitSaveView = async (): Promise<void> => {
+    const name = saveViewNameDraft.trim()
+    setSaveViewDraftOpen(false)
+    if (!name || !settings) return
+    const view: SavedView = {
+      id: `${Date.now()}`,
+      name,
+      createdAt: Date.now(),
+      filterRules,
+      activeExtensionGroups: Array.from(activeExtensionGroups),
+      activeSizePreset,
+      activeDatePreset,
+      sortField,
+      sortDir,
+      groupWords,
+      displayMode,
+      viewMode
+    }
+    const saved = await window.api.updateSettings({ savedViews: [...settings.savedViews, view] })
+    setSettings(saved)
+  }
+
+  const handleLoadView = (view: SavedView): void => {
+    setFilterRules(view.filterRules)
+    setActiveExtensionGroups(new Set(view.activeExtensionGroups))
+    setActiveSizePreset(view.activeSizePreset)
+    setActiveDatePreset(view.activeDatePreset)
+    setSortField(view.sortField)
+    setSortDir(view.sortDir)
+    setGroupWords(view.groupWords)
+    setDisplayMode(view.displayMode)
+    setViewMode(view.viewMode)
+    setSavedViewsPanelOpen(false)
+  }
+
+  const handleDeleteView = async (id: string): Promise<void> => {
+    if (!settings) return
+    const saved = await window.api.updateSettings({ savedViews: settings.savedViews.filter((view) => view.id !== id) })
+    setSettings(saved)
+  }
+
+  const handleDragStartRow = (event: React.DragEvent, row: FileRow): void => {
+    const paths = selectedRows.some((r) => r.path === row.path) ? selectedRows.map((r) => r.path) : [row.path]
+    event.dataTransfer.setData('application/x-sieve-paths', JSON.stringify(paths))
+    event.dataTransfer.effectAllowed = 'copyMove'
+  }
+
+  const handleDragOverRow = (event: React.DragEvent, row: FileRow): void => {
+    if (!row.isDirectory || !event.dataTransfer.types.includes('application/x-sieve-paths')) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = event.altKey ? 'copy' : 'move'
+    if (dragOverPath !== row.path) setDragOverPath(row.path)
+  }
+
+  const handleDragLeaveRow = (): void => {
+    setDragOverPath(null)
+  }
+
+  const handleDropOnRow = async (event: React.DragEvent, row: FileRow): Promise<void> => {
+    if (!row.isDirectory) return
+    event.preventDefault()
+    setDragOverPath(null)
+    const raw = event.dataTransfer.getData('application/x-sieve-paths')
+    if (!raw) return
+    const paths: string[] = JSON.parse(raw)
+    const filtered = paths.filter((path) => path !== row.path)
+    if (filtered.length === 0) return
+    try {
+      if (event.altKey) {
+        const created = await window.api.copyPaths(filtered, row.path)
+        if (created.length > 0) pushAction({ type: 'copy', created })
+      } else {
+        const moves = await window.api.movePaths(filtered, row.path)
+        if (moves.length > 0) pushAction({ type: 'move', moves })
+      }
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Drop failed')
+    }
+  }
+
+  const handleDelete = async (rowsOverride?: FileRow[]): Promise<void> => {
+    setContextMenu(null)
+    const targetRows = rowsOverride ?? selectedRows
+    if (!rootPath || targetRows.length === 0) return
+    try {
+      const deletions = await window.api.deletePaths(rootPath, targetRows.map((row) => row.path))
+      if (deletions.length > 0) {
+        pushAction({ type: 'delete', deletions })
+        setPinnedRows((prev) => {
+          if (prev.size === 0) return prev
+          const next = new Map(prev)
+          for (const { oldPath } of deletions) next.delete(oldPath)
+          return next
+        })
+      }
+      setSelectedRows([])
+      reload()
+      void refreshTrashCount(rootPath)
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Delete failed')
+    }
+  }
+
+  // Confirmation gate for destructive actions only (delete-to-trash, permanent empty-trash) -
+  // deliberately not applied to rename/move/etc, which are either trivially reversible or not
+  // destructive in the same sense.
+  const handleDeleteClick = (rowsOverride?: FileRow[]): void => {
+    setContextMenu(null)
+    const targetRows = rowsOverride ?? selectedRows
+    if (targetRows.length === 0) return
+    setConfirmDialog({
+      title: 'Delete files',
+      message: `Move ${targetRows.length} item${targetRows.length === 1 ? '' : 's'} to trash? This can be undone.`,
+      confirmLabel: 'Delete',
+      onConfirm: () => void handleDelete(rowsOverride)
+    })
+  }
+
+  const handleEmptyTrash = async (): Promise<void> => {
+    if (!rootPath || trashCount === 0) return
+    try {
+      await window.api.emptyTrash(rootPath)
+      // Any pending undo/redo "delete" entries would now restore from paths that no longer
+      // exist - clearing both stacks avoids a confusing "Undo failed" the next time either is
+      // used, at the cost of also losing history for unrelated earlier actions.
+      setUndoStack([])
+      setRedoStack([])
+      void refreshTrashCount(rootPath)
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Empty Trash failed')
+    }
+  }
+
+  const handleEmptyTrashClick = (): void => {
+    if (!rootPath || trashCount === 0) return
+    setConfirmDialog({
+      title: 'Empty trash',
+      message: `Permanently delete ${trashCount} item${trashCount === 1 ? '' : 's'} in the trash? This cannot be undone.`,
+      confirmLabel: 'Empty Trash',
+      onConfirm: () => void handleEmptyTrash()
+    })
+  }
+
+  const applyInverseAction = async (action: FileAction): Promise<void> => {
+    switch (action.type) {
+      case 'newFolder':
+        await window.api.removePaths([action.path])
+        break
+      case 'rename':
+        await window.api.renamePath(action.newPath, basenameFallback(action.oldPath))
+        break
+      case 'bulkRename':
+        for (const { oldPath, newPath } of action.renames) {
+          await window.api.renamePath(newPath, basenameFallback(oldPath))
+        }
+        break
+      case 'move':
+        for (const { oldPath, newPath } of action.moves) {
+          await window.api.movePaths([newPath], dirnameFallback(oldPath))
+        }
+        break
+      case 'copy':
+      case 'duplicate':
+        await window.api.removePaths(action.created.map((entry) => entry.newPath))
+        break
+      case 'delete':
+        for (const { oldPath, newPath } of action.deletions) {
+          await window.api.movePaths([newPath], dirnameFallback(oldPath))
+        }
+        if (rootPath) void refreshTrashCount(rootPath)
+        break
+    }
+  }
+
+  const applyForwardAction = async (action: FileAction): Promise<void> => {
+    switch (action.type) {
+      case 'newFolder':
+        await window.api.newFolder(dirnameFallback(action.path))
+        break
+      case 'rename':
+        await window.api.renamePath(action.oldPath, basenameFallback(action.newPath))
+        break
+      case 'bulkRename':
+        for (const { oldPath, newPath } of action.renames) {
+          await window.api.renamePath(oldPath, basenameFallback(newPath))
+        }
+        break
+      case 'move':
+        for (const { oldPath, newPath } of action.moves) {
+          await window.api.movePaths([oldPath], dirnameFallback(newPath))
+        }
+        break
+      case 'copy':
+        await window.api.copyPaths(
+          action.created.map((entry) => entry.oldPath),
+          dirnameFallback(action.created[0].newPath)
+        )
+        break
+      case 'duplicate':
+        await window.api.duplicatePaths(action.created.map((entry) => entry.oldPath))
+        break
+      case 'delete':
+        if (rootPath) {
+          await window.api.deletePaths(rootPath, action.deletions.map((entry) => entry.oldPath))
+          void refreshTrashCount(rootPath)
+        }
+        break
+    }
+  }
+
+  const handleUndo = async (): Promise<void> => {
+    const action = undoStack[undoStack.length - 1]
+    if (!action) return
+    setUndoStack((prev) => prev.slice(0, -1))
+    try {
+      await applyInverseAction(action)
+      setRedoStack((prev) => [...prev, action])
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Undo failed')
+    }
+  }
+
+  const handleRedo = async (): Promise<void> => {
+    const action = redoStack[redoStack.length - 1]
+    if (!action) return
+    setRedoStack((prev) => prev.slice(0, -1))
+    try {
+      await applyForwardAction(action)
+      setUndoStack((prev) => [...prev, action])
+      reload()
+    } catch (err) {
+      setFileOpError(err instanceof Error ? err.message : 'Redo failed')
+    }
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      event.preventDefault()
+      if (event.shiftKey) void handleRedo()
+      else void handleUndo()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [undoStack, redoStack])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      if (selectedRows.length === 0) return
+      event.preventDefault()
+      handleDeleteClick()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedRows, rootPath])
+
+  const handleBreadcrumbClick = (index: number): void => {
+    setPathStack((prev) => prev.slice(0, index + 1))
+  }
+
+  useEffect(() => {
+    const scope = buildScope(currentDir)
+    if (!scope || !draftPattern) {
+      setPreviewCount(null)
+      return
+    }
+    const draftRule: FilterRule = {
+      id: 'draft',
+      pattern: draftPattern,
+      mode: draftMode,
+      invert: draftInvert,
+      combinator: draftCombinator
+    }
+    setPreviewLoading(true)
+    const timeoutId = setTimeout(() => {
+      window.api
+        .previewFilterCount({ scope, filterRules: [...filterRules, draftRule], quickFilters })
+        .then((count) => setPreviewCount(count))
+        .catch(() => setPreviewCount(null))
+        .finally(() => setPreviewLoading(false))
+    }, 200)
+    return () => clearTimeout(timeoutId)
+  }, [draftPattern, draftMode, draftInvert, draftCombinator, filterRules, quickFilters, buildScope, currentDir])
+
+  const refreshPatternHistory = useCallback(async (): Promise<void> => {
+    const history = await window.api.getPatternHistory(10)
+    setPatternHistory(history)
+  }, [])
+
+  useEffect(() => {
+    void refreshPatternHistory()
+  }, [refreshPatternHistory])
+
+  const handleAddFilter = (): void => {
+    if (!draftPattern) return
+    const newRule: FilterRule = {
+      id: crypto.randomUUID(),
+      pattern: draftPattern,
+      mode: draftMode,
+      invert: draftInvert,
+      combinator: draftCombinator
+    }
+    setFilterRules((prev) => [...prev, newRule])
+    void window.api.recordPattern(draftPattern, draftMode).then(refreshPatternHistory)
+    setDraftPattern('')
+    setDraftInvert(false)
+    setPreviewCount(null)
+  }
+
+  const handleRemoveFilter = (id: string): void => {
+    setFilterRules((prev) => prev.filter((rule) => rule.id !== id))
+  }
+
+  const handleUseHistoryPattern = (entry: PatternHistoryEntry): void => {
+    setDraftPattern(entry.pattern)
+    setDraftMode(entry.mode)
+  }
+
+  const toggleExtensionGroup = (label: string): void => {
+    setActiveExtensionGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      return next
+    })
+  }
+
+  const toggleSizePreset = (label: string): void => {
+    setActiveSizePreset((prev) => (prev === label ? null : label))
+  }
+
+  const toggleDatePreset = (label: string): void => {
+    setActiveDatePreset((prev) => (prev === label ? null : label))
+  }
+
+  const handleAnalyzeWords = async (): Promise<void> => {
+    const scope = buildScope(currentDir)
+    if (!scope) return
+    setAnalyzingWords(true)
+    try {
+      const words = await window.api.analyzeWords({ scope, filterRules, quickFilters })
+      setWordFrequency(words)
+    } finally {
+      setAnalyzingWords(false)
+    }
+  }
+
+  const handleSelectGroupWord = (word: string): void => {
+    setGroupWords((prev) => (prev.includes(word) ? prev.filter((w) => w !== word) : [...prev, word]))
+  }
+
+  const handleRemoveGroupWord = (word: string): void => {
+    setGroupWords((prev) => prev.filter((w) => w !== word))
+  }
+
+  const handleCarouselPrev = (slotIndex: number): void => {
+    setPreviewSlots((prev) =>
+      prev.map((slot, index) =>
+        index === slotIndex
+          ? { ...slot, carouselIndex: (slot.carouselIndex - 1 + slot.frames.length) % slot.frames.length }
+          : slot
+      )
+    )
+  }
+
+  const handleCarouselNext = (slotIndex: number): void => {
+    setPreviewSlots((prev) =>
+      prev.map((slot, index) =>
+        index === slotIndex ? { ...slot, carouselIndex: (slot.carouselIndex + 1) % slot.frames.length } : slot
+      )
+    )
+  }
+
+  const handleSetCarouselIndex = (slotIndex: number, frameIndex: number): void => {
+    setPreviewSlots((prev) =>
+      prev.map((slot, index) => (index === slotIndex ? { ...slot, carouselIndex: frameIndex } : slot))
+    )
+  }
+
+  const matchHints = useMemo((): string[] => {
+    if (selectedRows.length !== 2) return []
+    const [a, b] = selectedRows
+    const hints: string[] = []
+    if (!a.isDirectory && !b.isDirectory && a.size === b.size) hints.push('Same size')
+    const tokensA = new Set(tokenizeFileName(a.name))
+    const sharedWord = tokenizeFileName(b.name).find((word) => tokensA.has(word))
+    if (sharedWord) hints.push(`Shares word "${sharedWord}"`)
+    return hints
+  }, [selectedRows])
+
+  const selectionAggregate = useMemo((): { count: number; totalSizeBytes: number } | null => {
+    if (selectedRows.length <= 1) return null
+    const totalSizeBytes = selectedRows.reduce((sum, row) => (row.isDirectory ? sum : sum + row.size), 0)
+    return { count: selectedRows.length, totalSizeBytes }
+  }, [selectedRows])
+
+  function renderPreviewCard(slot: PreviewSlot, slotIndex: number, cardWidth: number): React.JSX.Element {
+    const { row, frames, animatedUrl, carouselIndex } = slot
+    return (
+      <div key={row.path} style={{ width: cardWidth, flexShrink: 0 }}>
+        {/* Fixed 2-line height (not just wordBreak) so a long name doesn't push this card's
+            image lower than the other card's in the 2-file side-by-side compare view - both
+            titles reserve the same vertical space regardless of how many lines they actually
+            need, clamped with an ellipsis if a name would need a 3rd line. */}
+        <div
+          style={{
+            fontWeight: 600,
+            marginBottom: 8,
+            wordBreak: 'break-word',
+            lineHeight: '16px',
+            height: 32,
+            overflow: 'hidden',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical'
+          }}
+        >
+          {row.name}
+        </div>
+        {frames.length === 0 ? (
+          <div
+            style={{
+              width: '100%',
+              aspectRatio: '1',
+              background: theme.headerBg,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              borderRadius: 6
+            }}
+          >
+            <FileTypeIcon row={row} size={48} />
+            {!row.isDirectory && <span style={{ color: theme.muted }}>No preview available</span>}
+          </div>
+        ) : (
+          <>
+            <div
+              onClick={() => setLightboxUrl(animatedUrl ?? frames[carouselIndex].dataUrl)}
+              style={{
+                position: 'relative',
+                width: '100%',
+                aspectRatio: '1',
+                background: theme.headerBg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 6,
+                overflow: 'hidden',
+                cursor: 'zoom-in'
+              }}
+            >
+              <img
+                src={animatedUrl ?? frames[carouselIndex].dataUrl}
+                alt={row.name}
+                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              />
+              {!animatedUrl && frames.length > 1 && (
+                <>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleCarouselPrev(slotIndex)
+                    }}
+                    style={{
+                      position: 'absolute',
+                      left: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      border: 'none',
+                      borderRadius: '50%',
+                      width: 24,
+                      height: 24,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ‹
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleCarouselNext(slotIndex)
+                    }}
+                    style={{
+                      position: 'absolute',
+                      right: 4,
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      border: 'none',
+                      borderRadius: '50%',
+                      width: 24,
+                      height: 24,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    ›
+                  </button>
+                </>
+              )}
+            </div>
+            {!animatedUrl && frames.length > 1 && (
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 4, marginTop: 6 }}>
+                {frames.map((frame, index) => (
+                  <button
+                    key={frame.frameIndex}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleSetCarouselIndex(slotIndex, index)
+                    }}
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      border: 'none',
+                      padding: 0,
+                      cursor: 'pointer',
+                      background: index === carouselIndex ? theme.accent : theme.chipBorder
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        <div
+          style={{
+            marginTop: 10,
+            display: 'grid',
+            gridTemplateColumns: 'auto 1fr',
+            rowGap: 4,
+            columnGap: 12,
+            color: theme.fg
+          }}
+        >
+          <span style={{ color: theme.muted }}>Type</span>
+          <span style={{ textAlign: 'right' }}>{getTypeLabel(row)}</span>
+          {!row.isDirectory && (
+            <>
+              <span style={{ color: theme.muted }}>Size</span>
+              <span style={{ textAlign: 'right' }}>{formatBytes(row.size)}</span>
+            </>
+          )}
+          <span style={{ color: theme.muted }}>Modified</span>
+          <span style={{ textAlign: 'right' }}>{new Date(row.mtimeMs).toLocaleString()}</span>
+          <span style={{ color: theme.muted }}>Created</span>
+          <span style={{ textAlign: 'right' }}>{new Date(row.ctimeMs).toLocaleString()}</span>
+          {/* Path spans both columns and stays left-aligned - it's long wrapping text, not a
+              short value, so right-aligning it like the other fields would read as ragged/odd. */}
+          <span style={{ color: theme.muted, gridColumn: '1 / -1', marginTop: 4 }}>Path</span>
+          <span style={{ gridColumn: '1 / -1', wordBreak: 'break-all' }}>{row.path}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const handleSortClick = (field: SortField): void => {
+    if (field === sortField) {
+      setSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortField(field)
+      setSortDir('asc')
+    }
+  }
+
+  const handleColumnResizeStart = (field: string, event: React.MouseEvent): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    setActiveResizeColumn(field)
+    const startX = event.clientX
+    const startWidth = columnWidths[field] ?? DEFAULT_COLUMN_WIDTHS[field] ?? 120
+    const handleMouseMove = (moveEvent: MouseEvent): void => {
+      const nextWidth = Math.max(60, startWidth + (moveEvent.clientX - startX))
+      setColumnWidths((prev) => ({ ...prev, [field]: nextWidth }))
+    }
+    const handleMouseUp = (): void => {
+      setActiveResizeColumn(null)
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+  }
+
+  // Unified background-work indicator for the footer's bottom-right slot. Priority order for
+  // when more than one happens to be running at once - thumbnails are usually the longest-
+  // running and most "why is my disk churning" relevant, so they win. Scanning has its own
+  // dedicated progress bar/Cancel button elsewhere and isn't duplicated here.
+  const backgroundStatus: string | null = thumbnailProgress
+    ? `Generating thumbnails… ${thumbnailProgress.processed.toLocaleString()}/${thumbnailProgress.total.toLocaleString()}`
+    : analyzingWords
+      ? 'Analyzing words…'
+      : groupedLoading
+        ? 'Grouping…'
+        : null
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        fontFamily: 'sans-serif',
+        background: theme.bg,
+        color: theme.fg
+      }}
+    >
+      <Group
+        gap="sm"
+        wrap="wrap"
+        style={{ padding: 12, borderBottom: `1px solid ${theme.border}` }}
+      >
+        <Button variant="default" size="sm" onClick={handlePickRoot}>
+          Choose folder…
+        </Button>
+        <Checkbox
+          label="Show entire subtree"
+          checked={viewMode === 'recursive'}
+          onChange={(event) => setViewMode(event.currentTarget.checked ? 'recursive' : 'folder')}
+        />
+        <SegmentedControl
+          size="sm"
+          value={displayMode}
+          onChange={(value) => setDisplayMode(value as 'table' | 'gallery')}
+          data={[
+            { label: 'Table', value: 'table' },
+            { label: 'Gallery', value: 'gallery' }
+          ]}
+        />
+        {rootPath && !scanning && (
+          <Button variant="default" size="sm" onClick={handleRescan}>
+            Rescan
+          </Button>
+        )}
+        {rootPath && currentDir && !scanning && (
+          <Button variant="default" size="sm" onClick={handleNewFolder}>
+            New Folder
+          </Button>
+        )}
+        {rootPath && currentDir && !scanning && fileClipboard && (
+          <Button variant="default" size="sm" onClick={() => void handlePaste(currentDir)}>
+            Paste {fileClipboard.paths.length} item{fileClipboard.paths.length === 1 ? '' : 's'}
+          </Button>
+        )}
+        {rootPath && !scanning && (
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => void handleUndo()}
+            disabled={undoStack.length === 0}
+            title={undoStack.length > 0 ? `Undo ${describeFileAction(undoStack[undoStack.length - 1])}` : undefined}
+          >
+            Undo
+          </Button>
+        )}
+        {rootPath && !scanning && (
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => void handleRedo()}
+            disabled={redoStack.length === 0}
+            title={redoStack.length > 0 ? `Redo ${describeFileAction(redoStack[redoStack.length - 1])}` : undefined}
+          >
+            Redo
+          </Button>
+        )}
+        {rootPath && !scanning && selectedRows.length > 0 && (
+          <Button variant="light" color="red" size="sm" onClick={() => handleDeleteClick()}>
+            Delete {selectedRows.length} item{selectedRows.length === 1 ? '' : 's'}
+          </Button>
+        )}
+        {rootPath && !scanning && trashCount > 0 && (
+          <Button variant="default" size="sm" onClick={handleEmptyTrashClick}>
+            Empty Trash ({trashCount})
+          </Button>
+        )}
+        {rootPath && (
+          <Popover opened={pinnedPanelOpen} onChange={setPinnedPanelOpen} position="bottom-end" width={300} shadow="md">
+            <Popover.Target>
+              <Button
+                variant="default"
+                size="sm"
+                leftSection={<IconPin size={14} />}
+                disabled={pinnedRows.size === 0}
+                onClick={() => setPinnedPanelOpen((prev) => !prev)}
+              >
+                Pinned ({pinnedRows.size})
+              </Button>
+            </Popover.Target>
+            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '8px 12px',
+                  borderBottom: `1px solid ${theme.border}`,
+                  fontWeight: 600
+                }}
+              >
+                <span>Pinned ({pinnedRows.size})</span>
+                <button onClick={handleClearPinned} style={{ fontSize: 12, fontWeight: 400 }}>
+                  Clear all
+                </button>
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                {Array.from(pinnedRows.values()).map((row) => (
+                  <div
+                    key={row.path}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 12px',
+                      borderBottom: `1px solid ${theme.border}`
+                    }}
+                  >
+                    <span
+                      style={{
+                        flex: 1,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      <FileTypeIcon row={row} size={14} />
+                      {row.name}
+                    </span>
+                    <button onClick={() => handleUnpin(row.path)} style={{ display: 'flex' }}>
+                      <IconX size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: '8px 12px', borderTop: `1px solid ${theme.border}` }}>
+                <button onClick={handleSelectPinned} style={{ width: '100%' }}>
+                  Select All Pinned
+                </button>
+              </div>
+            </Popover.Dropdown>
+          </Popover>
+        )}
+        {rootPath && settings && (
+          <Popover
+            opened={savedViewsPanelOpen}
+            onChange={setSavedViewsPanelOpen}
+            position="bottom-end"
+            width={300}
+            shadow="md"
+          >
+            <Popover.Target>
+              <Button variant="default" size="sm" onClick={() => setSavedViewsPanelOpen((prev) => !prev)}>
+                Views ({settings.savedViews.length})
+              </Button>
+            </Popover.Target>
+            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderBottom: `1px solid ${theme.border}`,
+                  fontWeight: 600
+                }}
+              >
+                <span>Saved Views ({settings.savedViews.length})</span>
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1 }}>
+                {settings.savedViews.length === 0 && (
+                  <div style={{ padding: '10px 12px', color: theme.muted }}>No saved views yet.</div>
+                )}
+                {settings.savedViews.map((view) => (
+                  <div
+                    key={view.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '6px 12px',
+                      borderBottom: `1px solid ${theme.border}`
+                    }}
+                  >
+                    <button
+                      onClick={() => handleLoadView(view)}
+                      style={{
+                        flex: 1,
+                        textAlign: 'left',
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {view.name}
+                    </button>
+                    <button onClick={() => void handleDeleteView(view.id)} style={{ display: 'flex' }}>
+                      <IconX size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: '8px 12px', borderTop: `1px solid ${theme.border}` }}>
+                <button onClick={handleOpenSaveView} style={{ width: '100%' }}>
+                  Save current view…
+                </button>
+              </div>
+            </Popover.Dropdown>
+          </Popover>
+        )}
+        {rootPath && (
+          <Popover opened={storagePanelOpen} onChange={setStoragePanelOpen} position="bottom-end" width={320} shadow="md">
+            <Popover.Target>
+              <Button
+                variant="default"
+                size="sm"
+                leftSection={<IconChartBar size={14} />}
+                onClick={() => setStoragePanelOpen((prev) => !prev)}
+              >
+                Storage
+              </Button>
+            </Popover.Target>
+            <Popover.Dropdown p={0} style={{ maxHeight: 400, display: 'flex', flexDirection: 'column', fontSize: 13 }}>
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderBottom: `1px solid ${theme.border}`,
+                  fontWeight: 600
+                }}
+              >
+                Storage by extension
+              </div>
+              <div style={{ overflowY: 'auto', flex: 1, padding: '8px 12px' }}>
+                {storageBreakdown.length === 0 && <div style={{ color: theme.muted }}>No files in view.</div>}
+                {storageBreakdown.map((entry) => {
+                  const maxBytes = storageBreakdown[0]?.totalSizeBytes || 1
+                  const barPercent = (entry.totalSizeBytes / maxBytes) * 100
+                  return (
+                    <div key={entry.ext || '(none)'} style={{ marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span>
+                          {entry.ext ? `.${entry.ext}` : '(no extension)'} · {entry.count.toLocaleString()}
+                        </span>
+                        <span>{formatBytes(entry.totalSizeBytes)}</span>
+                      </div>
+                      <div style={{ background: theme.headerBg, borderRadius: 3, height: 8 }}>
+                        <div
+                          style={{
+                            background: theme.accent,
+                            borderRadius: 3,
+                            height: 8,
+                            width: `${barPercent}%`
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </Popover.Dropdown>
+          </Popover>
+        )}
+        <Button
+          variant="default"
+          size="sm"
+          leftSection={<IconSettings size={14} />}
+          onClick={handleOpenSettings}
+          style={{ marginLeft: 'auto' }}
+        >
+          Settings
+        </Button>
+        {scanning && (
+          <Button variant="default" size="sm" onClick={handleCancelScan}>
+            Cancel
+          </Button>
+        )}
+        {scanning && <Text size="sm">Scanning… {scanned} found</Text>}
+        {!scanning && rootPath && !error && <Text size="sm">{total} items</Text>}
+        {error && <Text size="sm" c="red">Error: {error}</Text>}
+        {health && !scanning && (
+          <Text size="xs" c="dimmed" style={{ marginLeft: 'auto' }}>
+            {health.fileCount.toLocaleString()} indexed · {formatBytes(health.dbSizeBytes)} cache ·{' '}
+            {health.lastScanAt ? `scanned ${new Date(health.lastScanAt).toLocaleTimeString()}` : 'not scanned yet'} ·{' '}
+            watcher {health.watcherActive ? 'active' : 'inactive'}
+          </Text>
+        )}
+      </Group>
+      {scanning && (
+        <div style={{ height: 3, overflow: 'hidden', background: theme.headerBg }}>
+          <div
+            style={{
+              height: '100%',
+              width: '40%',
+              background: theme.accent,
+              animation: 'sieve-indeterminate 1.1s ease-in-out infinite'
+            }}
+          />
+          <style>{`
+            @keyframes sieve-indeterminate {
+              0% { transform: translateX(-100%); }
+              100% { transform: translateX(250%); }
+            }
+          `}</style>
+        </div>
+      )}
+      {pathStack.length > 0 && (
+        <div style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}` }}>
+          {pathStack.map((entry, index) => (
+            <span key={entry.path}>
+              {index > 0 && <span style={{ margin: '0 4px' }}>/</span>}
+              <button
+                style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0 }}
+                disabled={index === pathStack.length - 1}
+                onClick={() => handleBreadcrumbClick(index)}
+              >
+                {entry.label}
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div
+        style={{
+          padding: '6px 12px',
+          borderBottom: `1px solid ${theme.border}`,
+          display: 'flex',
+          gap: 6,
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          fontSize: 12
+        }}
+      >
+        <span style={{ color: theme.muted }}>Quick filters:</span>
+        {EXTENSION_GROUPS.map((group) => (
+          <button
+            key={group.label}
+            onClick={() => toggleExtensionGroup(group.label)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              border: `1px solid ${theme.chipBorder}`,
+              borderRadius: 12,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              background: activeExtensionGroups.has(group.label) ? theme.accent : theme.chipBg,
+              color: activeExtensionGroups.has(group.label) ? theme.accentText : theme.fg
+            }}
+          >
+            <group.icon size={13} />
+            {group.label}
+          </button>
+        ))}
+        {SIZE_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            onClick={() => toggleSizePreset(preset.label)}
+            style={{
+              border: `1px solid ${theme.chipBorder}`,
+              borderRadius: 12,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              background: activeSizePreset === preset.label ? theme.accent : theme.chipBg,
+              color: activeSizePreset === preset.label ? theme.accentText : theme.fg
+            }}
+          >
+            {preset.label}
+          </button>
+        ))}
+        {DATE_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            onClick={() => toggleDatePreset(preset.label)}
+            style={{
+              border: `1px solid ${theme.chipBorder}`,
+              borderRadius: 12,
+              padding: '2px 8px',
+              cursor: 'pointer',
+              background: activeDatePreset === preset.label ? theme.accent : theme.chipBg,
+              color: activeDatePreset === preset.label ? theme.accentText : theme.fg
+            }}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+      <div
+        style={{
+          padding: '8px 12px',
+          borderBottom: `1px solid ${theme.border}`,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          flexWrap: 'wrap'
+        }}
+      >
+        {filterRules.map((rule, index) => (
+          <span
+            key={rule.id}
+            style={{
+              display: 'flex',
+              gap: 4,
+              alignItems: 'center',
+              background: theme.pillBg,
+              borderRadius: 4,
+              padding: '2px 6px',
+              fontSize: 12
+            }}
+          >
+            {index > 0 && <strong>{rule.combinator}</strong>}
+            {rule.invert && <span>NOT</span>}
+            <code>{rule.pattern}</code>
+            <span style={{ color: theme.muted }}>({rule.mode})</span>
+            <button
+              style={{ display: 'flex', border: 'none', background: 'none', cursor: 'pointer' }}
+              onClick={() => handleRemoveFilter(rule.id)}
+            >
+              <IconX size={11} />
+            </button>
+          </span>
+        ))}
+        {filterRules.length > 0 && (
+          <Select
+            data={[
+              { value: 'AND', label: 'AND' },
+              { value: 'OR', label: 'OR' }
+            ]}
+            value={draftCombinator}
+            onChange={(value) => {
+              if (value) setDraftCombinator(value as FilterCombinator)
+            }}
+            w={70}
+            size="xs"
+            allowDeselect={false}
+          />
+        )}
+        <TextInput
+          placeholder="regex pattern…"
+          value={draftPattern}
+          onChange={(event) => setDraftPattern(event.currentTarget.value)}
+          w={180}
+          size="xs"
+        />
+        <Select
+          data={[
+            { value: 'fuzzy', label: 'fuzzy' },
+            { value: 'strict', label: 'strict regex' }
+          ]}
+          value={draftMode}
+          onChange={(value) => {
+            if (value) setDraftMode(value as FilterMode)
+          }}
+          w={130}
+          size="xs"
+          allowDeselect={false}
+        />
+        <Checkbox
+          checked={draftInvert}
+          onChange={(event) => setDraftInvert(event.currentTarget.checked)}
+          label="NOT"
+          size="xs"
+        />
+        <Button size="xs" variant="default" onClick={handleAddFilter} disabled={!draftPattern}>
+          Add filter
+        </Button>
+        {draftPattern && (
+          <span style={{ fontSize: 12, color: theme.muted }}>
+            {previewLoading ? 'counting…' : `${previewCount ?? 0} would match`}
+          </span>
+        )}
+      </div>
+      <div style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}`, fontSize: 12 }}>
+        {/* Analyze button + selected-word tags get their own fixed row, separate from the word
+            list below - previously everything shared one flex-wrap row, so the whole toolbar
+            visibly shifted down every time a new word chip wrapped onto another line. */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Button
+            variant="default"
+            size="xs"
+            style={{ flexShrink: 0 }}
+            onClick={handleAnalyzeWords}
+            disabled={analyzingWords || !rootPath}
+          >
+            {analyzingWords ? 'Analyzing…' : 'Analyze words'}
+          </Button>
+          {groupWords.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <span style={{ flexShrink: 0 }}>Grouping by:</span>
+              {/* Scrolls horizontally instead of wrapping - with many selected words this row
+                  would otherwise grow to several lines and keep pushing the word list down. */}
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', overflowX: 'auto', flexShrink: 1 }}>
+                {groupWords.map((word) => (
+                  <span
+                    key={word}
+                    style={{ display: 'flex', gap: 2, alignItems: 'center', flexShrink: 0, whiteSpace: 'nowrap' }}
+                  >
+                    <code>{word}</code>
+                    <button
+                      style={{ display: 'flex', border: 'none', background: 'none', cursor: 'pointer', color: theme.fg }}
+                      onClick={() => handleRemoveGroupWord(word)}
+                    >
+                      <IconX size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              {groupedLoading && <span style={{ flexShrink: 0 }}>(loading…)</span>}
+            </div>
+          )}
+        </div>
+        {wordFrequency.length > 0 && (
+          <div style={{ display: 'flex', gap: 6, overflowX: 'auto', marginTop: 8, paddingBottom: 4 }}>
+            {wordFrequency.map((entry) => (
+              <button
+                key={entry.word}
+                onClick={() => handleSelectGroupWord(entry.word)}
+                style={{
+                  flexShrink: 0,
+                  border: `1px solid ${theme.chipBorder}`,
+                  borderRadius: 12,
+                  padding: '2px 8px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  background: groupWords.includes(entry.word) ? theme.accent : theme.chipBg,
+                  color: groupWords.includes(entry.word) ? theme.accentText : theme.fg
+                }}
+              >
+                {entry.word} ({entry.count})
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {patternHistory.length > 0 && (
+        <div
+          style={{
+            padding: '4px 12px 8px',
+            display: 'flex',
+            gap: 6,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            fontSize: 12
+          }}
+        >
+          <span style={{ color: theme.muted }}>Recent:</span>
+          {patternHistory.map((entry) => (
+            <button
+              key={`${entry.mode}:${entry.pattern}`}
+              onClick={() => handleUseHistoryPattern(entry)}
+              style={{
+                border: `1px solid ${theme.chipBorder}`,
+                borderRadius: 4,
+                padding: '1px 6px',
+                cursor: 'pointer',
+                background: theme.chipBg,
+                color: theme.fg
+              }}
+            >
+              <code>{entry.pattern}</code> <span style={{ color: theme.muted }}>({entry.mode})</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {groupWords.length > 0 && groups.length > 0 && (
+        <div
+          style={{
+            padding: '4px 12px',
+            borderBottom: `1px solid ${theme.border}`,
+            display: 'flex',
+            gap: 6,
+            flexWrap: 'wrap',
+            fontSize: 12
+          }}
+        >
+          <span style={{ color: theme.muted }}>Jump to:</span>
+          {groups.map((group, index) => (
+            <button
+              key={group.label}
+              onClick={() => handleJumpToGroup(index)}
+              style={{
+                border: `1px solid ${theme.chipBorder}`,
+                borderRadius: 4,
+                padding: '1px 6px',
+                cursor: 'pointer',
+                background: theme.chipBg,
+                color: theme.fg
+              }}
+            >
+              {group.label} ({group.rows.length})
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minWidth: 0 }} onContextMenu={(event) => handleContextMenu(event, null)}>
+        {displayMode === 'gallery' ? (
+          <VirtuosoGrid
+            ref={galleryVirtuosoRef}
+            style={{ height: '100%' }}
+            data={galleryData}
+            endReached={groupWords.length === 0 ? handleEndReached : undefined}
+            listClassName="sieve-gallery-list"
+            itemClassName="sieve-gallery-item"
+            components={{ Item: GalleryItem }}
+            itemContent={(_index, entry) => {
+              if (entry.kind === 'divider') {
+                const collapsed = collapsedGroups.has(entry.label)
+                return (
+                  <div
+                    onClick={() => handleToggleGroupCollapse(entry.label)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 4px',
+                      cursor: 'pointer',
+                      userSelect: 'none',
+                      color: theme.muted,
+                      fontSize: 12
+                    }}
+                  >
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                      {collapsed ? '▸' : '▾'} {entry.label}
+                    </span>
+                    <span style={{ flex: 1, borderBottom: `1px solid ${theme.border}` }} />
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                      {entry.count.toLocaleString()} items, {formatBytes(entry.totalSizeBytes)}
+                    </span>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        const groupRows = groups.find((g) => g.label === entry.label)?.rows ?? []
+                        handleDeleteClick(groupRows)
+                      }}
+                      style={{ fontSize: 11, color: theme.dangerText }}
+                    >
+                      Delete all
+                    </button>
+                  </div>
+                )
+              }
+              const row = entry.row
+              const isSelected = selectedRows.some((r) => r.path === row.path)
+              const isDragOver = dragOverPath === row.path
+              return (
+                <div
+                  draggable
+                  onDragStart={(event) => handleDragStartRow(event, row)}
+                  onDragOver={(event) => handleDragOverRow(event, row)}
+                  onDragLeave={handleDragLeaveRow}
+                  onDrop={(event) => void handleDropOnRow(event, row)}
+                  onClick={(event) => handleSelectRow(row, event)}
+                  onContextMenu={(event) => handleContextMenu(event, row)}
+                  style={{
+                    flex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: 10,
+                    border: isDragOver
+                      ? `1px solid ${theme.dragOverBorder}`
+                      : isSelected
+                        ? `1px solid ${theme.selectedBorder}`
+                        : `1px solid ${theme.border}`,
+                    background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
+                    borderRadius: 6,
+                    cursor: row.isDirectory ? 'pointer' : 'default',
+                    textAlign: 'center'
+                  }}
+                >
+                  <div
+                    style={{
+                      width: '100%',
+                      aspectRatio: '1',
+                      background: theme.headerBg,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: 32,
+                      overflow: 'hidden'
+                    }}
+                  >
+                    <RowIcon row={row} size={32} fill />
+                  </div>
+                  <span style={{ fontSize: 12, wordBreak: 'break-word' }}>
+                    {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
+                    {renderNameText(row)}
+                  </span>
+                  {!row.isDirectory && (
+                    <span style={{ fontSize: 11, color: theme.muted }}>{formatBytes(row.size)}</span>
+                  )}
+                </div>
+              )
+            }}
+          />
+        ) : groupWords.length > 0 ? (
+          <GroupedVirtuoso
+            ref={groupedVirtuosoRef}
+            style={{ height: '100%' }}
+            groupCounts={groupCounts}
+            groupContent={(index) => {
+              const group = groups[index]
+              const collapsed = collapsedGroups.has(group.label)
+              const totalSize = group.rows.reduce((sum, row) => (row.isDirectory ? sum : sum + row.size), 0)
+              return (
+                <div
+                  onClick={() => handleToggleGroupCollapse(group.label)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    background: theme.headerBg,
+                    color: theme.fg,
+                    padding: '6px 12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    userSelect: 'none'
+                  }}
+                >
+                  <span>
+                    {collapsed ? '▸' : '▾'} {group.label} — {group.rows.length.toLocaleString()} items,{' '}
+                    {formatBytes(totalSize)}
+                  </span>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      handleDeleteClick(group.rows)
+                    }}
+                    style={{ fontSize: 11, fontWeight: 400, color: theme.dangerText }}
+                  >
+                    Delete all
+                  </button>
+                </div>
+              )
+            }}
+            itemContent={(index) => {
+              const row = groupFlatRows[index]
+              const isSelected = selectedRows.some((r) => r.path === row.path)
+              const isDragOver = dragOverPath === row.path
+              return (
+                <div
+                  draggable
+                  onDragStart={(event) => handleDragStartRow(event, row)}
+                  onDragOver={(event) => handleDragOverRow(event, row)}
+                  onDragLeave={handleDragLeaveRow}
+                  onDrop={(event) => void handleDropOnRow(event, row)}
+                  style={{
+                    display: 'flex',
+                    padding: '4px 12px',
+                    cursor: row.isDirectory ? 'pointer' : 'default',
+                    background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
+                    outline: isDragOver ? `1px solid ${theme.dragOverBorder}` : 'none'
+                  }}
+                  onClick={(event) => handleSelectRow(row, event)}
+                  onContextMenu={(event) => handleContextMenu(event, row)}
+                >
+                  <span style={{ flex: 1 }}>
+                    <RowIcon row={row} size={16} /> {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
+                    {renderNameText(row)}
+                  </span>
+                  <span style={{ width: 100, textAlign: 'right' }}>
+                    {row.isDirectory ? '' : row.size.toLocaleString()}
+                  </span>
+                  <span style={{ width: 180 }}>{new Date(row.mtimeMs).toLocaleString()}</span>
+                  <span style={{ width: 180 }}>{new Date(row.ctimeMs).toLocaleString()}</span>
+                </div>
+              )
+            }}
+          />
+        ) : (
+          <TableVirtuoso
+            ref={tableVirtuosoRef}
+            style={{ height: '100%' }}
+            data={rows}
+            endReached={handleEndReached}
+            components={{
+              // No `width: '100%'` here on purpose: with table-layout: fixed, a table forced to
+              // 100% width redistributes/stretches the declared per-column widths to fill that
+              // 100%, which mutes (or reverses) a manual resize - most visibly on the largest
+              // column (Name), which is exactly the "first column won't resize" symptom. Letting
+              // the table size to the natural sum of its column widths instead means resizing
+              // maps 1:1 to the drag distance; any leftover space just shows as gutter.
+              Table: (props) => <table {...props} style={{ ...props.style, tableLayout: 'fixed' }} />
+            }}
+            fixedHeaderContent={() => (
+              <tr style={{ background: theme.headerBg }}>
+                {SORT_COLUMNS.map((column) => (
+                  <th
+                    key={column.field}
+                    style={{
+                      position: 'relative',
+                      width: columnWidths[column.field] ?? DEFAULT_COLUMN_WIDTHS[column.field],
+                      textAlign: column.align,
+                      padding: 8,
+                      cursor: 'pointer',
+                      userSelect: 'none'
+                    }}
+                    onClick={() => handleSortClick(column.field)}
+                  >
+                    {column.label}
+                    {sortField === column.field ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                    <div
+                      onMouseDown={(event) => handleColumnResizeStart(column.field, event)}
+                      onClick={(event) => event.stopPropagation()}
+                      onMouseEnter={() => setHoveredResizeColumn(column.field)}
+                      onMouseLeave={() => setHoveredResizeColumn(null)}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        right: -4,
+                        bottom: 0,
+                        width: 9,
+                        cursor: 'col-resize',
+                        display: 'flex',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 2,
+                          height: '100%',
+                          background:
+                            activeResizeColumn === column.field || hoveredResizeColumn === column.field
+                              ? theme.accent
+                              : theme.border
+                        }}
+                      />
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            )}
+            itemContent={(_index, row) => {
+              const isSelected = selectedRows.some((r) => r.path === row.path)
+              const isDragOver = dragOverPath === row.path
+              const cellStyle = {
+                padding: 8,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap' as const,
+                background: isDragOver ? theme.dragOverBg : isSelected ? theme.selectedBg : 'transparent',
+                outline: isDragOver ? `1px solid ${theme.dragOverBorder}` : 'none'
+              }
+              const dragProps = {
+                draggable: true,
+                onDragStart: (event: React.DragEvent) => handleDragStartRow(event, row),
+                onDragOver: (event: React.DragEvent) => handleDragOverRow(event, row),
+                onDragLeave: handleDragLeaveRow,
+                onDrop: (event: React.DragEvent) => void handleDropOnRow(event, row),
+                onContextMenu: (event: React.MouseEvent) => handleContextMenu(event, row)
+              }
+              return (
+                <>
+                  <td
+                    {...dragProps}
+                    style={{
+                      ...cellStyle,
+                      width: columnWidths.name ?? DEFAULT_COLUMN_WIDTHS.name,
+                      cursor: row.isDirectory ? 'pointer' : 'default'
+                    }}
+                    onClick={(event) => handleSelectRow(row, event)}
+                  >
+                    <RowIcon row={row} size={16} /> {pinnedRows.has(row.path) && <IconPin size={11} style={{ verticalAlign: 'middle' }} />}
+                    {renderNameText(row)}
+                  </td>
+                  <td
+                    {...dragProps}
+                    style={{ ...cellStyle, width: columnWidths.size ?? DEFAULT_COLUMN_WIDTHS.size, textAlign: 'right' }}
+                    onClick={(event) => handleSelectRow(row, event)}
+                  >
+                    {row.isDirectory ? '' : row.size.toLocaleString()}
+                  </td>
+                  <td
+                    {...dragProps}
+                    style={{ ...cellStyle, width: columnWidths.mtimeMs ?? DEFAULT_COLUMN_WIDTHS.mtimeMs }}
+                    onClick={(event) => handleSelectRow(row, event)}
+                  >
+                    {new Date(row.mtimeMs).toLocaleString()}
+                  </td>
+                  <td
+                    {...dragProps}
+                    style={{ ...cellStyle, width: columnWidths.ctimeMs ?? DEFAULT_COLUMN_WIDTHS.ctimeMs }}
+                    onClick={(event) => handleSelectRow(row, event)}
+                  >
+                    {new Date(row.ctimeMs).toLocaleString()}
+                  </td>
+                </>
+              )
+            }}
+          />
+        )}
+      </div>
+      <div
+        style={{
+          width: selectedRows.length === 0 ? 0 : selectedRows.length === 2 ? 460 : 260,
+          flexShrink: 0,
+          overflow: 'hidden',
+          transition: 'width 200ms ease',
+          borderLeft: selectedRows.length > 0 ? `1px solid ${theme.border}` : 'none'
+        }}
+      >
+        <div
+          style={{
+            width: selectedRows.length === 2 ? 460 : 260,
+            padding: 12,
+            fontSize: 12,
+            boxSizing: 'border-box'
+          }}
+        >
+          {selectionAggregate && (
+            <div style={{ marginBottom: 10, fontWeight: 600, color: theme.fg }}>
+              {selectionAggregate.count.toLocaleString()} selected · {formatBytes(selectionAggregate.totalSizeBytes)}
+            </div>
+          )}
+          {matchHints.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+              {matchHints.map((hint) => (
+                <span
+                  key={hint}
+                  style={{
+                    background: theme.pillBg,
+                    color: theme.pillText,
+                    borderRadius: 4,
+                    padding: '2px 6px',
+                    fontSize: 11
+                  }}
+                >
+                  {hint}
+                </span>
+              ))}
+            </div>
+          )}
+          {selectedRows.length === 1 && previewSlots[0] && renderPreviewCard(previewSlots[0], 0, 260)}
+          {selectedRows.length === 2 && (
+            <div style={{ display: 'flex', gap: 12 }}>
+              {previewSlots.map((slot, index) => renderPreviewCard(slot, index, 212))}
+            </div>
+          )}
+        </div>
+      </div>
+      </div>
+      {lightboxUrl && (
+        <div
+          onClick={() => setLightboxUrl(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            cursor: 'zoom-out'
+          }}
+        >
+          <img
+            src={lightboxUrl}
+            alt=""
+            style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain' }}
+          />
+        </div>
+      )}
+      <Menu opened={!!contextMenu} onClose={() => setContextMenu(null)} position="bottom-start" shadow="md" width={190}>
+        <Menu.Target>
+          <div style={{ position: 'fixed', top: contextMenu?.y ?? 0, left: contextMenu?.x ?? 0, width: 0, height: 0 }} />
+        </Menu.Target>
+        <Menu.Dropdown>
+          {contextMenu?.row ? (
+            <>
+              {selectedRows.length === 1 && (
+                <Menu.Item onClick={() => handleRowActivate(contextMenu.row as FileRow)}>Open</Menu.Item>
+              )}
+              {selectedRows.length <= 1 ? (
+                <Menu.Item onClick={() => handleStartRename(contextMenu.row as FileRow)}>Rename</Menu.Item>
+              ) : (
+                <Menu.Item onClick={handleStartBulkRename}>Rename {selectedRows.length} items…</Menu.Item>
+              )}
+              <Menu.Item onClick={() => void handleDuplicate()}>Duplicate</Menu.Item>
+              <Menu.Item onClick={handleCut}>Cut</Menu.Item>
+              <Menu.Item onClick={handleCopy}>Copy</Menu.Item>
+              {Boolean(contextMenu.row.isDirectory) && fileClipboard && (
+                <Menu.Item onClick={() => void handlePaste((contextMenu.row as FileRow).path)}>Paste here</Menu.Item>
+              )}
+              <Menu.Item onClick={() => void handleCopyPath()}>Copy Path{selectedRows.length > 1 ? 's' : ''}</Menu.Item>
+              <Menu.Item onClick={() => void handleRevealInFolder(contextMenu.row as FileRow)}>Reveal in folder</Menu.Item>
+              <Menu.Item onClick={handleTogglePinSelected}>
+                {allSelectedPinned
+                  ? `Unpin ${selectedRows.length > 1 ? `${selectedRows.length} items` : ''}`
+                  : `Pin ${selectedRows.length > 1 ? `${selectedRows.length} items` : ''}`}
+              </Menu.Item>
+              <Menu.Item color="red" onClick={() => handleDeleteClick()}>
+                Delete
+              </Menu.Item>
+            </>
+          ) : (
+            <>
+              <Menu.Item onClick={() => void handleNewFolder()}>New Folder</Menu.Item>
+              {fileClipboard && currentDir && (
+                <Menu.Item onClick={() => void handlePaste(currentDir)}>
+                  Paste {fileClipboard.paths.length} item{fileClipboard.paths.length === 1 ? '' : 's'}
+                </Menu.Item>
+              )}
+            </>
+          )}
+        </Menu.Dropdown>
+      </Menu>
+      <Modal
+        opened={bulkRenameOpen}
+        onClose={handleCancelBulkRename}
+        title={`Rename ${selectedRows.length} items`}
+        centered
+      >
+        <TextInput
+          autoFocus
+          value={bulkRenameDraft}
+          onChange={(event) => setBulkRenameDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') void handleCommitBulkRename()
+          }}
+        />
+        <Text size="xs" c="dimmed" mt={6} mb="md">
+          First item becomes &quot;{bulkRenameDraft || 'name'}&quot;, the rest become &quot;
+          {bulkRenameDraft || 'name'} (2)&quot;, &quot;{bulkRenameDraft || 'name'} (3)&quot;, etc.
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="default" onClick={handleCancelBulkRename}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleCommitBulkRename()}>Rename</Button>
+        </Group>
+      </Modal>
+      <Modal opened={saveViewDraftOpen} onClose={handleCancelSaveView} title="Save current view" centered>
+        <TextInput
+          autoFocus
+          value={saveViewNameDraft}
+          onChange={(event) => setSaveViewNameDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') void handleCommitSaveView()
+          }}
+          placeholder="View name"
+          mb="md"
+        />
+        <Group justify="flex-end">
+          <Button variant="default" onClick={handleCancelSaveView}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleCommitSaveView()}>Save</Button>
+        </Group>
+      </Modal>
+      <Modal opened={settingsPanelOpen && !!settingsDraft} onClose={handleCancelSettings} title="Settings" size="sm">
+        {settingsDraft && (
+          <Stack gap={6}>
+            <Text fw={600}>Thumbnails</Text>
+            <Group justify="space-between">
+              <Text size="sm">Video frame count</Text>
+              <NumberInput
+                min={1}
+                max={12}
+                value={settingsDraft.thumbnails.videoFrameCount}
+                onChange={(value) =>
+                  setSettingsDraft({
+                    ...settingsDraft,
+                    thumbnails: { ...settingsDraft.thumbnails, videoFrameCount: Number(value) || 1 }
+                  })
+                }
+                w={80}
+              />
+            </Group>
+            <Group justify="space-between">
+              <Text size="sm">Resolution (px)</Text>
+              <NumberInput
+                min={100}
+                max={2000}
+                step={50}
+                value={settingsDraft.thumbnails.resolution}
+                onChange={(value) =>
+                  setSettingsDraft({
+                    ...settingsDraft,
+                    thumbnails: { ...settingsDraft.thumbnails, resolution: Number(value) || 100 }
+                  })
+                }
+                w={80}
+              />
+            </Group>
+            <Text size="xs" c="dimmed">
+              Only affects thumbnails generated after saving - existing ones need a manual cache
+              clear to regenerate at a new size.
+            </Text>
+
+            <Text fw={600} mt="xs">
+              Performance
+            </Text>
+            <Group justify="space-between">
+              <Text size="sm">Thumbnail worker concurrency</Text>
+              <NumberInput
+                min={1}
+                max={8}
+                value={settingsDraft.performance.workerConcurrency}
+                onChange={(value) =>
+                  setSettingsDraft({
+                    ...settingsDraft,
+                    performance: { ...settingsDraft.performance, workerConcurrency: Number(value) || 1 }
+                  })
+                }
+                w={80}
+              />
+            </Group>
+
+            <Text fw={600} mt="xs">
+              Trash
+            </Text>
+            <Group gap={6}>
+              <Checkbox
+                checked={settingsDraft.trash.autoPurgeDays !== null}
+                onChange={(event) =>
+                  setSettingsDraft({
+                    ...settingsDraft,
+                    trash: { autoPurgeDays: event.currentTarget.checked ? 30 : null }
+                  })
+                }
+                label="Automatically empty trash older than"
+              />
+              <NumberInput
+                min={1}
+                max={365}
+                disabled={settingsDraft.trash.autoPurgeDays === null}
+                value={settingsDraft.trash.autoPurgeDays ?? 30}
+                onChange={(value) => setSettingsDraft({ ...settingsDraft, trash: { autoPurgeDays: Number(value) || 1 } })}
+                w={70}
+              />
+              <Text size="sm">days</Text>
+            </Group>
+            <Text size="xs" c="dimmed">
+              Off by default (manual Empty Trash only).
+            </Text>
+
+            <Text fw={600} mt="xs">
+              Defaults for next launch
+            </Text>
+            <Group justify="space-between">
+              <Text size="sm">Sort field</Text>
+              <Select
+                data={SORT_COLUMNS.map((column) => ({ value: column.field, label: column.label }))}
+                value={settingsDraft.defaultSortField}
+                onChange={(value) => {
+                  if (value) setSettingsDraft({ ...settingsDraft, defaultSortField: value as SortField })
+                }}
+                w={140}
+                allowDeselect={false}
+              />
+            </Group>
+            <Group justify="space-between">
+              <Text size="sm">Sort direction</Text>
+              <Select
+                data={[
+                  { value: 'asc', label: 'Ascending' },
+                  { value: 'desc', label: 'Descending' }
+                ]}
+                value={settingsDraft.defaultSortDir}
+                onChange={(value) => {
+                  if (value) setSettingsDraft({ ...settingsDraft, defaultSortDir: value as SortDir })
+                }}
+                w={140}
+                allowDeselect={false}
+              />
+            </Group>
+            <Group justify="space-between">
+              <Text size="sm">View mode</Text>
+              <Select
+                data={[
+                  { value: 'table', label: 'Table' },
+                  { value: 'gallery', label: 'Gallery' }
+                ]}
+                value={settingsDraft.defaultViewMode}
+                onChange={(value) => {
+                  if (value) setSettingsDraft({ ...settingsDraft, defaultViewMode: value as 'table' | 'gallery' })
+                }}
+                w={140}
+                allowDeselect={false}
+              />
+            </Group>
+
+            <Text fw={600} mt="xs">
+              Theme
+            </Text>
+            <Group justify="space-between">
+              <Text size="sm">Theme</Text>
+              <Select
+                data={[
+                  { value: 'system', label: 'System' },
+                  { value: 'light', label: 'Light' },
+                  { value: 'dark', label: 'Dark' }
+                ]}
+                value={settingsDraft.theme}
+                onChange={(value) => {
+                  if (value) setSettingsDraft({ ...settingsDraft, theme: value as AppSettings['theme'] })
+                }}
+                w={140}
+                allowDeselect={false}
+              />
+            </Group>
+            <Text size="xs" c="dimmed">
+              Applies on Save. &quot;System&quot; follows the OS setting live.
+            </Text>
+
+            <Text fw={600} mt="xs">
+              Config file
+            </Text>
+            <Group gap={8}>
+              <Button variant="default" size="xs" onClick={() => void handleExportConfig()}>
+                Export…
+              </Button>
+              <Button variant="default" size="xs" onClick={() => void handleImportConfig()}>
+                Import…
+              </Button>
+            </Group>
+            <Text size="xs" c="dimmed">
+              Exports/imports every setting above, including saved views. Regex pattern history is
+              stored separately and isn&apos;t included.
+            </Text>
+
+            <Group justify="flex-end" mt="sm">
+              <Button variant="default" onClick={handleCancelSettings}>
+                Cancel
+              </Button>
+              <Button onClick={() => void handleSaveSettings()}>Save</Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
+      {fileOpError && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: 40,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: theme.errorBg,
+            color: theme.errorText,
+            border: `1px solid ${theme.errorText}`,
+            borderRadius: 6,
+            padding: '8px 14px',
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            zIndex: 1200
+          }}
+        >
+          {fileOpError}
+          <button
+            onClick={() => setFileOpError(null)}
+            style={{ display: 'flex', border: 'none', background: 'transparent', cursor: 'pointer' }}
+          >
+            <IconX size={14} />
+          </button>
+        </div>
+      )}
+      <Modal opened={!!confirmDialog} onClose={() => setConfirmDialog(null)} title={confirmDialog?.title} centered>
+        <Text size="sm" mb="md">
+          {confirmDialog?.message}
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="default" size="sm" onClick={() => setConfirmDialog(null)}>
+            Cancel
+          </Button>
+          <Button
+            color="red"
+            size="sm"
+            onClick={() => {
+              confirmDialog?.onConfirm()
+              setConfirmDialog(null)
+            }}
+          >
+            {confirmDialog?.confirmLabel}
+          </Button>
+        </Group>
+      </Modal>
+      <div
+        style={{
+          padding: '4px 12px',
+          borderTop: `1px solid ${theme.border}`,
+          fontSize: 12,
+          color: theme.muted,
+          background: theme.headerBg,
+          display: 'flex',
+          justifyContent: 'space-between'
+        }}
+      >
+        <span>
+          {aggregate
+            ? `${aggregate.count.toLocaleString()} items in view · ${formatBytes(aggregate.totalSizeBytes)}`
+            : '—'}
+        </span>
+        {backgroundStatus && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Loader size="xs" />
+            {backgroundStatus}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
