@@ -48,6 +48,7 @@ import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDis
 import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } from './pathUtils'
 import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
+import { usePinned } from './hooks/usePinned'
 import { useSettings } from './hooks/useSettings'
 
 export default function App(): React.JSX.Element {
@@ -104,13 +105,6 @@ export default function App(): React.JSX.Element {
   const [undoStack, setUndoStack] = useState<FileAction[]>([])
   const [redoStack, setRedoStack] = useState<FileAction[]>([])
   const [trashCount, setTrashCount] = useState(0)
-  // Pinned "working set" (#26): survives filter/grouping/view-mode changes on purpose, so a
-  // multi-pass triage (filter -> pin a few -> change filter -> pin a few more -> ...) can end
-  // with one "Select All Pinned" that loads the whole set into selectedRows for a single bulk
-  // action. Stores the FileRow snapshot, not just the path, since a pinned file may be
-  // filtered out of `rows` entirely by the time it's acted on.
-  const [pinnedRows, setPinnedRows] = useState<Map<string, FileRow>>(new Map())
-  const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false)
   const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
   const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
   const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
@@ -143,6 +137,18 @@ export default function App(): React.JSX.Element {
     setHoveredResizeColumn,
     handleColumnResizeStart
   } = useColumnLayout()
+
+  const {
+    pinnedRows,
+    pinnedPanelOpen,
+    setPinnedPanelOpen,
+    allSelectedPinned,
+    handleTogglePinSelected,
+    handleUnpin,
+    handleSelectPinned,
+    handleClearPinned,
+    removePinnedPaths
+  } = usePinned(selectedRows, (rows) => setSelectedRows(rows), () => setContextMenu(null))
 
   const {
     settings,
@@ -576,7 +582,7 @@ export default function App(): React.JSX.Element {
     setScanned(0)
     setHealth(null)
     setScanning(true)
-    setPinnedRows(new Map())
+    handleClearPinned()
     setSelectedRows([])
     setUndoStack([])
     setRedoStack([])
@@ -752,37 +758,6 @@ export default function App(): React.JSX.Element {
     await window.api.revealInFolder(row.path)
   }
 
-  const allSelectedPinned = selectedRows.length > 0 && selectedRows.every((row) => pinnedRows.has(row.path))
-
-  const handleTogglePinSelected = (): void => {
-    setContextMenu(null)
-    setPinnedRows((prev) => {
-      const next = new Map(prev)
-      for (const row of selectedRows) {
-        if (allSelectedPinned) next.delete(row.path)
-        else next.set(row.path, row)
-      }
-      return next
-    })
-  }
-
-  const handleUnpin = (path: string): void => {
-    setPinnedRows((prev) => {
-      const next = new Map(prev)
-      next.delete(path)
-      return next
-    })
-  }
-
-  const handleSelectPinned = (): void => {
-    setSelectedRows(Array.from(pinnedRows.values()))
-    setPinnedPanelOpen(false)
-  }
-
-  const handleClearPinned = (): void => {
-    setPinnedRows(new Map())
-  }
-
   const handleOpenSaveView = (): void => {
     setSaveViewNameDraft('')
     setSaveViewDraftOpen(true)
@@ -880,12 +855,7 @@ export default function App(): React.JSX.Element {
       const deletions = await window.api.deletePaths(rootPath, targetRows.map((row) => row.path))
       if (deletions.length > 0) {
         pushAction({ type: 'delete', deletions })
-        setPinnedRows((prev) => {
-          if (prev.size === 0) return prev
-          const next = new Map(prev)
-          for (const { oldPath } of deletions) next.delete(oldPath)
-          return next
-        })
+        removePinnedPaths(deletions.map(({ oldPath }) => oldPath))
       }
       setSelectedRows([])
       reload()
