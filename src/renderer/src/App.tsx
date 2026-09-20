@@ -5,7 +5,6 @@ import {
   Group,
   Loader,
   Menu,
-  Modal,
   Popover,
   SegmentedControl,
   Select,
@@ -39,6 +38,9 @@ import type {
 } from '../../shared/types'
 import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
+import { BulkRenameModal } from './components/BulkRenameModal'
+import { ConfirmDialogModal } from './components/ConfirmDialogModal'
+import { SaveViewModal } from './components/SaveViewModal'
 import { SettingsModal } from './components/SettingsModal'
 import { basenameFallback, describeFileAction, formatBytes } from './pathUtils'
 import type { GalleryEntry, PreviewSlot, StackEntry } from './types'
@@ -1872,49 +1874,21 @@ export default function App(): React.JSX.Element {
           )}
         </Menu.Dropdown>
       </Menu>
-      <Modal
+      <BulkRenameModal
         opened={bulkRenameOpen}
-        onClose={handleCancelBulkRename}
-        title={`Rename ${selectedRows.length} items`}
-        centered
-      >
-        <TextInput
-          autoFocus
-          value={bulkRenameDraft}
-          onChange={(event) => setBulkRenameDraft(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') void handleCommitBulkRename()
-          }}
-        />
-        <Text size="xs" c="dimmed" mt={6} mb="md">
-          First item becomes &quot;{bulkRenameDraft || 'name'}&quot;, the rest become &quot;
-          {bulkRenameDraft || 'name'} (2)&quot;, &quot;{bulkRenameDraft || 'name'} (3)&quot;, etc.
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" onClick={handleCancelBulkRename}>
-            Cancel
-          </Button>
-          <Button onClick={() => void handleCommitBulkRename()}>Rename</Button>
-        </Group>
-      </Modal>
-      <Modal opened={saveViewDraftOpen} onClose={handleCancelSaveView} title="Save current view" centered>
-        <TextInput
-          autoFocus
-          value={saveViewNameDraft}
-          onChange={(event) => setSaveViewNameDraft(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') void handleCommitSaveView()
-          }}
-          placeholder="View name"
-          mb="md"
-        />
-        <Group justify="flex-end">
-          <Button variant="default" onClick={handleCancelSaveView}>
-            Cancel
-          </Button>
-          <Button onClick={() => void handleCommitSaveView()}>Save</Button>
-        </Group>
-      </Modal>
+        itemCount={selectedRows.length}
+        draft={bulkRenameDraft}
+        setDraft={setBulkRenameDraft}
+        onCancel={handleCancelBulkRename}
+        onCommit={() => void handleCommitBulkRename()}
+      />
+      <SaveViewModal
+        opened={saveViewDraftOpen}
+        nameDraft={saveViewNameDraft}
+        setNameDraft={setSaveViewNameDraft}
+        onCancel={handleCancelSaveView}
+        onCommit={() => void handleCommitSaveView()}
+      />
       <SettingsModal
         opened={settingsPanelOpen}
         settingsDraft={settingsDraft}
@@ -1952,26 +1926,7 @@ export default function App(): React.JSX.Element {
           </button>
         </div>
       )}
-      <Modal opened={!!confirmDialog} onClose={() => setConfirmDialog(null)} title={confirmDialog?.title} centered>
-        <Text size="sm" mb="md">
-          {confirmDialog?.message}
-        </Text>
-        <Group justify="flex-end">
-          <Button variant="default" size="sm" onClick={() => setConfirmDialog(null)}>
-            Cancel
-          </Button>
-          <Button
-            color="red"
-            size="sm"
-            onClick={() => {
-              confirmDialog?.onConfirm()
-              setConfirmDialog(null)
-            }}
-          >
-            {confirmDialog?.confirmLabel}
-          </Button>
-        </Group>
-      </Modal>
+      <ConfirmDialogModal dialog={confirmDialog} onClose={() => setConfirmDialog(null)} />
       <div
         style={{
           padding: '4px 12px',
