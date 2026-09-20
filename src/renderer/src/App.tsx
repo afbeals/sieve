@@ -40,7 +40,6 @@ import type {
   SavedView,
   SortDir,
   SortField,
-  StorageBreakdownEntry,
   WordFrequencyEntry
 } from '../../shared/types'
 import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
@@ -50,6 +49,7 @@ import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
 import { usePinned } from './hooks/usePinned'
 import { useSettings } from './hooks/useSettings'
+import { useStorageBreakdown } from './hooks/useStorageBreakdown'
 
 export default function App(): React.JSX.Element {
   const [rootPath, setRootPath] = useState<string | null>(null)
@@ -108,8 +108,6 @@ export default function App(): React.JSX.Element {
   const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
   const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
   const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
-  const [storageBreakdown, setStorageBreakdown] = useState<StorageBreakdownEntry[]>([])
-  const [storagePanelOpen, setStoragePanelOpen] = useState(false)
   const loadingMore = useRef(false)
   const groupedVirtuosoRef = useRef<GroupedVirtuosoHandle>(null)
   const tableVirtuosoRef = useRef<TableVirtuosoHandle>(null)
@@ -272,27 +270,12 @@ export default function App(): React.JSX.Element {
     }
   }, [buildScope, currentDir, filterRules, quickFilters])
 
-  // Storage breakdown (#33): only fetched while its panel is open - it's a diagnostic view,
-  // not something the whole-view status bar (which uses loadAggregate above) needs on every
-  // keystroke.
-  const loadStorageBreakdown = useCallback(async (): Promise<void> => {
-    if (!storagePanelOpen) return
-    const scope = buildScope(currentDir)
-    if (!scope) {
-      setStorageBreakdown([])
-      return
-    }
-    try {
-      const result = await window.api.getStorageBreakdown({ scope, filterRules, quickFilters })
-      setStorageBreakdown(result)
-    } catch (err) {
-      console.error('Failed to load storage breakdown', err)
-    }
-  }, [storagePanelOpen, buildScope, currentDir, filterRules, quickFilters])
-
-  useEffect(() => {
-    void loadStorageBreakdown()
-  }, [loadStorageBreakdown])
+  const { storageBreakdown, storagePanelOpen, setStoragePanelOpen, loadStorageBreakdown } = useStorageBreakdown(
+    buildScope,
+    currentDir,
+    filterRules,
+    quickFilters
+  )
 
   // Manual double-click detection (click timestamps) instead of the native `dblclick` event:
   // every row is `draggable` for drag-to-move, and Chromium's drag-vs-click disambiguation on
