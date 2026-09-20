@@ -24,21 +24,8 @@ import {
   type TableVirtuosoHandle,
   type VirtuosoGridHandle
 } from 'react-virtuoso'
-import {
-  IconChartBar,
-  IconFile,
-  IconFileText,
-  IconFileZip,
-  IconFolder,
-  IconPhoto,
-  IconPin,
-  IconSettings,
-  IconVideo,
-  IconX,
-  type Icon as TablerIcon
-} from '@tabler/icons-react'
+import { IconChartBar, IconPin, IconSettings, IconX } from '@tabler/icons-react'
 import { tokenizeFileName } from '../../shared/tokenize'
-import { getMediaKind } from '../../shared/media'
 import './gallery.css'
 import type {
   AppSettings,
@@ -49,210 +36,18 @@ import type {
   IndexHealth,
   ListingAggregate,
   ListingScope,
-  PathMapping,
   PatternHistoryEntry,
   QuickFilters,
   SavedView,
   SortDir,
   SortField,
   StorageBreakdownEntry,
-  ThumbnailFramePreview,
   WordFrequencyEntry
 } from '../../shared/types'
-
-const SORT_COLUMNS: { field: SortField; label: string; align: 'left' | 'right' }[] = [
-  { field: 'name', label: 'Name', align: 'left' },
-  { field: 'size', label: 'Size', align: 'right' },
-  { field: 'mtimeMs', label: 'Modified', align: 'left' },
-  { field: 'ctimeMs', label: 'Created', align: 'left' }
-]
-
-// Persistent layout (#32): fallback widths for a fresh session / older settings file that
-// predates a given column key.
-const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
-  name: 320,
-  size: 110,
-  mtimeMs: 170,
-  ctimeMs: 170
-}
-
-// Real Mantine CSS variables (set by MantineProvider, and re-resolved automatically whenever
-// the color scheme changes - no light/dark JS branch needed) instead of a hand-rolled palette,
-// so every custom-styled element below stays in sync with Mantine's own light/dark tokens.
-const theme = {
-  bg: 'var(--mantine-color-body)',
-  fg: 'var(--mantine-color-text)',
-  muted: 'var(--mantine-color-dimmed)',
-  border: 'var(--mantine-color-default-border)',
-  headerBg: 'var(--mantine-color-default)',
-  selectedBg: 'var(--mantine-primary-color-light)',
-  selectedBorder: 'var(--mantine-primary-color-filled)',
-  dragOverBg: 'var(--mantine-color-green-light)',
-  dragOverBorder: 'var(--mantine-color-green-filled)',
-  chipBg: 'var(--mantine-color-default)',
-  chipBorder: 'var(--mantine-color-default-border)',
-  pillBg: 'var(--mantine-color-blue-light)',
-  pillText: 'var(--mantine-color-blue-light-color)',
-  accent: 'var(--mantine-primary-color-filled)',
-  accentText: 'var(--mantine-primary-color-contrast)',
-  dangerText: 'var(--mantine-color-error)',
-  errorBg: 'var(--mantine-color-red-light)',
-  errorText: 'var(--mantine-color-red-light-color)'
-}
-
-const EXTENSION_GROUPS: { label: string; extensions: string[]; icon: TablerIcon }[] = [
-  { label: 'Images', extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg'], icon: IconPhoto },
-  { label: 'Videos', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'], icon: IconVideo },
-  { label: 'Documents', extensions: ['pdf', 'doc', 'docx', 'txt', 'md', 'rtf'], icon: IconFileText },
-  { label: 'Archives', extensions: ['zip', 'rar', '7z', 'tar', 'gz'], icon: IconFileZip }
-]
-
-function getFileIcon(row: FileRow): TablerIcon {
-  if (row.isDirectory) return IconFolder
-  return EXTENSION_GROUPS.find((group) => group.extensions.includes(row.ext))?.icon ?? IconFile
-}
-
-function FileTypeIcon({ row, size = 16 }: { row: FileRow; size?: number }): React.JSX.Element {
-  const Icon = getFileIcon(row)
-  return <Icon size={size} style={{ verticalAlign: 'middle', flexShrink: 0 }} />
-}
-
-// Row-icon-as-thumbnail: a plain module-level cache (not React state) since it's a rendering
-// cache shared across every row/component instance, not app state - once a path's icon is
-// fetched, every future mount of that row (e.g. scrolling back into a virtualized view) reads
-// it synchronously instead of re-fetching. `undefined` = not yet fetched, `null` = fetched but
-// no thumbnail exists (falls back to the Tabler file-type icon).
-const thumbnailIconCache = new Map<string, string | null>()
-
-function useThumbnailIcon(row: FileRow): string | null {
-  const mediaKind = row.isDirectory ? null : getMediaKind(row.ext)
-  const [iconUrl, setIconUrl] = useState<string | null>(() => (mediaKind ? thumbnailIconCache.get(row.path) ?? null : null))
-  useEffect(() => {
-    if (!mediaKind) return
-    const cached = thumbnailIconCache.get(row.path)
-    if (cached !== undefined) {
-      setIconUrl(cached)
-      return
-    }
-    let cancelled = false
-    void window.api.getThumbnailIcon(row.path).then((url) => {
-      thumbnailIconCache.set(row.path, url)
-      if (!cancelled) setIconUrl(url)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [row.path, mediaKind])
-  return iconUrl
-}
-
-// `fill` renders the image to completely cover its container (the gallery grid's square tile);
-// otherwise it's a small inline square next to the file name (table/grouped-list rows),
-// matching the fallback icon's footprint via `size`.
-function RowIcon({ row, size, fill }: { row: FileRow; size: number; fill?: boolean }): React.JSX.Element {
-  const iconUrl = useThumbnailIcon(row)
-  if (iconUrl) {
-    return (
-      <img
-        src={iconUrl}
-        alt=""
-        style={
-          fill
-            ? { width: '100%', height: '100%', objectFit: 'cover' }
-            : { width: size, height: size, objectFit: 'cover', borderRadius: 3, verticalAlign: 'middle' }
-        }
-      />
-    )
-  }
-  return <FileTypeIcon row={row} size={size} />
-}
-
-function getTypeLabel(row: FileRow): string {
-  if (row.isDirectory) return 'Folder'
-  return row.ext ? `${row.ext.toUpperCase()} file` : 'File'
-}
-
-const SIZE_PRESETS: { label: string; minSizeBytes: number }[] = [
-  { label: '≥100MB', minSizeBytes: 100 * 1024 * 1024 },
-  { label: '≥1GB', minSizeBytes: 1024 * 1024 * 1024 }
-]
-
-const DATE_PRESETS: { label: string; withinMs: number }[] = [
-  { label: 'Today', withinMs: 24 * 60 * 60 * 1000 },
-  { label: 'This week', withinMs: 7 * 24 * 60 * 60 * 1000 },
-  { label: 'This month', withinMs: 30 * 24 * 60 * 60 * 1000 }
-]
-
-const PAGE_SIZE = 200
-
-interface StackEntry {
-  path: string
-  label: string
-}
-
-type GalleryEntry =
-  | { kind: 'divider'; label: string; count: number; totalSizeBytes: number }
-  | { kind: 'row'; row: FileRow }
-
-interface PreviewSlot {
-  row: FileRow
-  frames: ThumbnailFramePreview[]
-  animatedUrl: string | null
-  carouselIndex: number
-}
-
-type FileAction =
-  | { type: 'newFolder'; path: string }
-  | { type: 'rename'; oldPath: string; newPath: string }
-  | { type: 'bulkRename'; renames: PathMapping[] }
-  | { type: 'move'; moves: PathMapping[] }
-  | { type: 'copy'; created: PathMapping[] }
-  | { type: 'duplicate'; created: PathMapping[] }
-  | { type: 'delete'; deletions: PathMapping[] }
-
-function basenameFallback(path: string): string {
-  const segments = path.split(/[/\\]/).filter(Boolean)
-  return segments[segments.length - 1] ?? path
-}
-
-// No node:path in the renderer (contextIsolation with no nodeIntegration) - this only needs
-// to strip the last real separator that's actually present in an absolute path already
-// produced by the main process, not to be a general-purpose path utility.
-function dirnameFallback(path: string): string {
-  const separatorIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return separatorIndex === -1 ? path : path.slice(0, separatorIndex)
-}
-
-function describeFileAction(action: FileAction): string {
-  switch (action.type) {
-    case 'newFolder':
-      return `New Folder "${basenameFallback(action.path)}"`
-    case 'rename':
-      return `Rename to "${basenameFallback(action.newPath)}"`
-    case 'bulkRename':
-      return `Bulk Rename (${action.renames.length} item${action.renames.length === 1 ? '' : 's'})`
-    case 'move':
-      return `Move (${action.moves.length} item${action.moves.length === 1 ? '' : 's'})`
-    case 'copy':
-      return `Copy (${action.created.length} item${action.created.length === 1 ? '' : 's'})`
-    case 'duplicate':
-      return `Duplicate (${action.created.length} item${action.created.length === 1 ? '' : 's'})`
-    case 'delete':
-      return `Delete (${action.deletions.length} item${action.deletions.length === 1 ? '' : 's'})`
-  }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  const units = ['KB', 'MB', 'GB']
-  let value = bytes / 1024
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  return `${value.toFixed(1)} ${units[unitIndex]}`
-}
+import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
+import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
+import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } from './pathUtils'
+import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
 
 export default function App(): React.JSX.Element {
   const [rootPath, setRootPath] = useState<string | null>(null)
