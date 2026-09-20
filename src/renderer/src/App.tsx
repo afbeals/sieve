@@ -43,9 +43,10 @@ import type {
 } from '../../shared/types'
 import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLUMNS, theme } from './constants'
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
-import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } from './pathUtils'
-import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
+import { basenameFallback, describeFileAction, formatBytes } from './pathUtils'
+import type { GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
+import { useFileOps } from './hooks/useFileOps'
 import { usePinned } from './hooks/usePinned'
 import { usePreview } from './hooks/usePreview'
 import { useSavedViews } from './hooks/useSavedViews'
@@ -84,23 +85,7 @@ export default function App(): React.JSX.Element {
   const [groupedLoading, setGroupedLoading] = useState(false)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [aggregate, setAggregate] = useState<ListingAggregate | null>(null)
-  const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut' } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: FileRow | null } | null>(null)
-  const [renamingPath, setRenamingPath] = useState<string | null>(null)
-  const [renameDraft, setRenameDraft] = useState('')
-  const [bulkRenameOpen, setBulkRenameOpen] = useState(false)
-  const [bulkRenameDraft, setBulkRenameDraft] = useState('')
-  const [fileOpError, setFileOpError] = useState<string | null>(null)
-  const [confirmDialog, setConfirmDialog] = useState<{
-    title: string
-    message: string
-    confirmLabel: string
-    onConfirm: () => void
-  } | null>(null)
-  const [dragOverPath, setDragOverPath] = useState<string | null>(null)
-  const [undoStack, setUndoStack] = useState<FileAction[]>([])
-  const [redoStack, setRedoStack] = useState<FileAction[]>([])
-  const [trashCount, setTrashCount] = useState(0)
   const loadingMore = useRef(false)
   const groupedVirtuosoRef = useRef<GroupedVirtuosoHandle>(null)
   const tableVirtuosoRef = useRef<TableVirtuosoHandle>(null)
@@ -260,10 +245,6 @@ export default function App(): React.JSX.Element {
     setHealth(result)
   }, [])
 
-  const refreshTrashCount = useCallback(async (root: string): Promise<void> => {
-    setTrashCount(await window.api.getTrashCount(root))
-  }, [])
-
   const loadGroupedRows = useCallback(async (): Promise<void> => {
     const scope = buildScope(currentDir)
     if (!scope || groupWords.length === 0) {
@@ -324,20 +305,61 @@ export default function App(): React.JSX.Element {
     handleSetCarouselIndex
   } = usePreview(selectedRows)
 
+  const {
+    renamingPath,
+    renameDraft,
+    setRenameDraft,
+    bulkRenameOpen,
+    bulkRenameDraft,
+    setBulkRenameDraft,
+    fileOpError,
+    setFileOpError,
+    confirmDialog,
+    setConfirmDialog,
+    dragOverPath,
+    undoStack,
+    redoStack,
+    trashCount,
+    refreshTrashCount,
+    fileClipboard,
+    handleStartRename,
+    handleCancelRename,
+    handleCommitRename,
+    handleStartBulkRename,
+    handleCancelBulkRename,
+    handleCommitBulkRename,
+    handleNewFolder,
+    handleCut,
+    handleCopy,
+    handlePaste,
+    handleDuplicate,
+    handleCopyPath,
+    handleRevealInFolder,
+    handleDragStartRow,
+    handleDragOverRow,
+    handleDragLeaveRow,
+    handleDropOnRow,
+    handleDeleteClick,
+    handleEmptyTrashClick,
+    handleUndo,
+    handleRedo,
+    clearActionHistory
+  } = useFileOps(rootPath, currentDir, selectedRows, setSelectedRows, reload, removePinnedPaths, () => setContextMenu(null))
+
   // Context menu (Menu) and the Pinned/Views/Storage panels (Popover) handle their own
   // click-outside and Escape-to-close behavior - no manual window listeners needed for them.
   useEffect(() => {
     if (!renamingPath && !bulkRenameOpen && !settingsPanelOpen && !saveViewDraftOpen) return
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
-      setRenamingPath(null)
-      setBulkRenameOpen(false)
+      handleCancelRename()
+      handleCancelBulkRename()
       setSettingsPanelOpen(false)
       handleCancelSaveView()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [renamingPath, bulkRenameOpen, settingsPanelOpen, saveViewDraftOpen, handleCancelSaveView])
+  }, [renamingPath, bulkRenameOpen, settingsPanelOpen, saveViewDraftOpen, handleCancelRename, handleCancelBulkRename, handleCancelSaveView])
 
   useEffect(() => {
     void loadAggregate()
@@ -558,8 +580,7 @@ export default function App(): React.JSX.Element {
     setScanning(true)
     handleClearPinned()
     setSelectedRows([])
-    setUndoStack([])
-    setRedoStack([])
+    clearActionHistory()
     await window.api.startScan(picked)
   }
 
@@ -606,335 +627,6 @@ export default function App(): React.JSX.Element {
     if (row && !selectedRows.some((r) => r.path === row.path)) setSelectedRows([row])
     setContextMenu({ x: event.clientX, y: event.clientY, row })
   }
-
-  const handleStartRename = (row: FileRow): void => {
-    setContextMenu(null)
-    setRenamingPath(row.path)
-    setRenameDraft(row.name)
-  }
-
-  const handleCancelRename = (): void => {
-    setRenamingPath(null)
-  }
-
-  const pushAction = (action: FileAction): void => {
-    setUndoStack((prev) => [...prev, action])
-    setRedoStack([])
-  }
-
-  const handleCommitRename = async (): Promise<void> => {
-    const path = renamingPath
-    const draft = renameDraft.trim()
-    setRenamingPath(null)
-    if (!path || !draft) return
-    try {
-      const newPath = await window.api.renamePath(path, draft)
-      if (newPath !== path) pushAction({ type: 'rename', oldPath: path, newPath })
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Rename failed')
-    }
-  }
-
-  function baseNameWithoutExt(row: FileRow): string {
-    if (row.isDirectory || !row.ext) return row.name
-    return row.name.slice(0, row.name.length - row.ext.length - 1)
-  }
-
-  const handleStartBulkRename = (): void => {
-    setContextMenu(null)
-    if (selectedRows.length < 2) return
-    setBulkRenameDraft(baseNameWithoutExt(selectedRows[0]))
-    setBulkRenameOpen(true)
-  }
-
-  const handleCancelBulkRename = (): void => {
-    setBulkRenameOpen(false)
-  }
-
-  const handleCommitBulkRename = async (): Promise<void> => {
-    const draft = bulkRenameDraft.trim()
-    const paths = selectedRows.map((row) => row.path)
-    setBulkRenameOpen(false)
-    if (!draft || paths.length === 0) return
-    try {
-      const renames = await window.api.bulkRename(paths, draft)
-      pushAction({ type: 'bulkRename', renames })
-      setSelectedRows([])
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Bulk rename failed')
-    }
-  }
-
-  const handleNewFolder = async (): Promise<void> => {
-    setContextMenu(null)
-    if (!currentDir) return
-    try {
-      const path = await window.api.newFolder(currentDir)
-      pushAction({ type: 'newFolder', path })
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Could not create folder')
-    }
-  }
-
-  const handleCut = (): void => {
-    setContextMenu(null)
-    if (selectedRows.length === 0) return
-    setFileClipboard({ paths: selectedRows.map((row) => row.path), mode: 'cut' })
-  }
-
-  const handleCopy = (): void => {
-    setContextMenu(null)
-    if (selectedRows.length === 0) return
-    setFileClipboard({ paths: selectedRows.map((row) => row.path), mode: 'copy' })
-  }
-
-  const handlePaste = async (destDir: string): Promise<void> => {
-    setContextMenu(null)
-    if (!fileClipboard) return
-    try {
-      if (fileClipboard.mode === 'cut') {
-        const moves = await window.api.movePaths(fileClipboard.paths, destDir)
-        if (moves.length > 0) pushAction({ type: 'move', moves })
-        setFileClipboard(null)
-      } else {
-        const created = await window.api.copyPaths(fileClipboard.paths, destDir)
-        if (created.length > 0) pushAction({ type: 'copy', created })
-      }
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Paste failed')
-    }
-  }
-
-  const handleDuplicate = async (): Promise<void> => {
-    setContextMenu(null)
-    if (selectedRows.length === 0) return
-    try {
-      const created = await window.api.duplicatePaths(selectedRows.map((row) => row.path))
-      if (created.length > 0) pushAction({ type: 'duplicate', created })
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Duplicate failed')
-    }
-  }
-
-  const handleCopyPath = async (): Promise<void> => {
-    setContextMenu(null)
-    if (selectedRows.length === 0) return
-    await window.api.copyPathsToClipboard(selectedRows.map((row) => row.path))
-  }
-
-  const handleRevealInFolder = async (row: FileRow): Promise<void> => {
-    setContextMenu(null)
-    await window.api.revealInFolder(row.path)
-  }
-
-  const handleDragStartRow = (event: React.DragEvent, row: FileRow): void => {
-    const paths = selectedRows.some((r) => r.path === row.path) ? selectedRows.map((r) => r.path) : [row.path]
-    event.dataTransfer.setData('application/x-sieve-paths', JSON.stringify(paths))
-    event.dataTransfer.effectAllowed = 'copyMove'
-  }
-
-  const handleDragOverRow = (event: React.DragEvent, row: FileRow): void => {
-    if (!row.isDirectory || !event.dataTransfer.types.includes('application/x-sieve-paths')) return
-    event.preventDefault()
-    event.dataTransfer.dropEffect = event.altKey ? 'copy' : 'move'
-    if (dragOverPath !== row.path) setDragOverPath(row.path)
-  }
-
-  const handleDragLeaveRow = (): void => {
-    setDragOverPath(null)
-  }
-
-  const handleDropOnRow = async (event: React.DragEvent, row: FileRow): Promise<void> => {
-    if (!row.isDirectory) return
-    event.preventDefault()
-    setDragOverPath(null)
-    const raw = event.dataTransfer.getData('application/x-sieve-paths')
-    if (!raw) return
-    const paths: string[] = JSON.parse(raw)
-    const filtered = paths.filter((path) => path !== row.path)
-    if (filtered.length === 0) return
-    try {
-      if (event.altKey) {
-        const created = await window.api.copyPaths(filtered, row.path)
-        if (created.length > 0) pushAction({ type: 'copy', created })
-      } else {
-        const moves = await window.api.movePaths(filtered, row.path)
-        if (moves.length > 0) pushAction({ type: 'move', moves })
-      }
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Drop failed')
-    }
-  }
-
-  const handleDelete = async (rowsOverride?: FileRow[]): Promise<void> => {
-    setContextMenu(null)
-    const targetRows = rowsOverride ?? selectedRows
-    if (!rootPath || targetRows.length === 0) return
-    try {
-      const deletions = await window.api.deletePaths(rootPath, targetRows.map((row) => row.path))
-      if (deletions.length > 0) {
-        pushAction({ type: 'delete', deletions })
-        removePinnedPaths(deletions.map(({ oldPath }) => oldPath))
-      }
-      setSelectedRows([])
-      reload()
-      void refreshTrashCount(rootPath)
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Delete failed')
-    }
-  }
-
-  // Confirmation gate for destructive actions only (delete-to-trash, permanent empty-trash) -
-  // deliberately not applied to rename/move/etc, which are either trivially reversible or not
-  // destructive in the same sense.
-  const handleDeleteClick = (rowsOverride?: FileRow[]): void => {
-    setContextMenu(null)
-    const targetRows = rowsOverride ?? selectedRows
-    if (targetRows.length === 0) return
-    setConfirmDialog({
-      title: 'Delete files',
-      message: `Move ${targetRows.length} item${targetRows.length === 1 ? '' : 's'} to trash? This can be undone.`,
-      confirmLabel: 'Delete',
-      onConfirm: () => void handleDelete(rowsOverride)
-    })
-  }
-
-  const handleEmptyTrash = async (): Promise<void> => {
-    if (!rootPath || trashCount === 0) return
-    try {
-      await window.api.emptyTrash(rootPath)
-      // Any pending undo/redo "delete" entries would now restore from paths that no longer
-      // exist - clearing both stacks avoids a confusing "Undo failed" the next time either is
-      // used, at the cost of also losing history for unrelated earlier actions.
-      setUndoStack([])
-      setRedoStack([])
-      void refreshTrashCount(rootPath)
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Empty Trash failed')
-    }
-  }
-
-  const handleEmptyTrashClick = (): void => {
-    if (!rootPath || trashCount === 0) return
-    setConfirmDialog({
-      title: 'Empty trash',
-      message: `Permanently delete ${trashCount} item${trashCount === 1 ? '' : 's'} in the trash? This cannot be undone.`,
-      confirmLabel: 'Empty Trash',
-      onConfirm: () => void handleEmptyTrash()
-    })
-  }
-
-  const applyInverseAction = async (action: FileAction): Promise<void> => {
-    switch (action.type) {
-      case 'newFolder':
-        await window.api.removePaths([action.path])
-        break
-      case 'rename':
-        await window.api.renamePath(action.newPath, basenameFallback(action.oldPath))
-        break
-      case 'bulkRename':
-        for (const { oldPath, newPath } of action.renames) {
-          await window.api.renamePath(newPath, basenameFallback(oldPath))
-        }
-        break
-      case 'move':
-        for (const { oldPath, newPath } of action.moves) {
-          await window.api.movePaths([newPath], dirnameFallback(oldPath))
-        }
-        break
-      case 'copy':
-      case 'duplicate':
-        await window.api.removePaths(action.created.map((entry) => entry.newPath))
-        break
-      case 'delete':
-        for (const { oldPath, newPath } of action.deletions) {
-          await window.api.movePaths([newPath], dirnameFallback(oldPath))
-        }
-        if (rootPath) void refreshTrashCount(rootPath)
-        break
-    }
-  }
-
-  const applyForwardAction = async (action: FileAction): Promise<void> => {
-    switch (action.type) {
-      case 'newFolder':
-        await window.api.newFolder(dirnameFallback(action.path))
-        break
-      case 'rename':
-        await window.api.renamePath(action.oldPath, basenameFallback(action.newPath))
-        break
-      case 'bulkRename':
-        for (const { oldPath, newPath } of action.renames) {
-          await window.api.renamePath(oldPath, basenameFallback(newPath))
-        }
-        break
-      case 'move':
-        for (const { oldPath, newPath } of action.moves) {
-          await window.api.movePaths([oldPath], dirnameFallback(newPath))
-        }
-        break
-      case 'copy':
-        await window.api.copyPaths(
-          action.created.map((entry) => entry.oldPath),
-          dirnameFallback(action.created[0].newPath)
-        )
-        break
-      case 'duplicate':
-        await window.api.duplicatePaths(action.created.map((entry) => entry.oldPath))
-        break
-      case 'delete':
-        if (rootPath) {
-          await window.api.deletePaths(rootPath, action.deletions.map((entry) => entry.oldPath))
-          void refreshTrashCount(rootPath)
-        }
-        break
-    }
-  }
-
-  const handleUndo = async (): Promise<void> => {
-    const action = undoStack[undoStack.length - 1]
-    if (!action) return
-    setUndoStack((prev) => prev.slice(0, -1))
-    try {
-      await applyInverseAction(action)
-      setRedoStack((prev) => [...prev, action])
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Undo failed')
-    }
-  }
-
-  const handleRedo = async (): Promise<void> => {
-    const action = redoStack[redoStack.length - 1]
-    if (!action) return
-    setRedoStack((prev) => prev.slice(0, -1))
-    try {
-      await applyForwardAction(action)
-      setUndoStack((prev) => [...prev, action])
-      reload()
-    } catch (err) {
-      setFileOpError(err instanceof Error ? err.message : 'Redo failed')
-    }
-  }
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
-      const target = event.target as HTMLElement | null
-      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
-      event.preventDefault()
-      if (event.shiftKey) void handleRedo()
-      else void handleUndo()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [undoStack, redoStack])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
