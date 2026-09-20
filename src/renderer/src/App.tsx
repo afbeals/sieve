@@ -47,6 +47,7 @@ import { DATE_PRESETS, DEFAULT_COLUMN_WIDTHS, PAGE_SIZE, SIZE_PRESETS, SORT_COLU
 import { EXTENSION_GROUPS, FileTypeIcon, RowIcon, getTypeLabel } from './fileDisplay'
 import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } from './pathUtils'
 import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
+import { useColumnLayout } from './hooks/useColumnLayout'
 import { useSettings } from './hooks/useSettings'
 
 export default function App(): React.JSX.Element {
@@ -113,9 +114,6 @@ export default function App(): React.JSX.Element {
   const [savedViewsPanelOpen, setSavedViewsPanelOpen] = useState(false)
   const [saveViewDraftOpen, setSaveViewDraftOpen] = useState(false)
   const [saveViewNameDraft, setSaveViewNameDraft] = useState('')
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_COLUMN_WIDTHS)
-  const [activeResizeColumn, setActiveResizeColumn] = useState<string | null>(null)
-  const [hoveredResizeColumn, setHoveredResizeColumn] = useState<string | null>(null)
   const [storageBreakdown, setStorageBreakdown] = useState<StorageBreakdownEntry[]>([])
   const [storagePanelOpen, setStoragePanelOpen] = useState(false)
   const loadingMore = useRef(false)
@@ -136,6 +134,15 @@ export default function App(): React.JSX.Element {
       modifiedAfterMs: datePreset ? Date.now() - datePreset.withinMs : undefined
     }
   }, [activeExtensionGroups, activeSizePreset, activeDatePreset])
+
+  const {
+    columnWidths,
+    setColumnWidths,
+    activeResizeColumn,
+    hoveredResizeColumn,
+    setHoveredResizeColumn,
+    handleColumnResizeStart
+  } = useColumnLayout()
 
   const {
     settings,
@@ -1354,25 +1361,6 @@ export default function App(): React.JSX.Element {
       setSortField(field)
       setSortDir('asc')
     }
-  }
-
-  const handleColumnResizeStart = (field: string, event: React.MouseEvent): void => {
-    event.preventDefault()
-    event.stopPropagation()
-    setActiveResizeColumn(field)
-    const startX = event.clientX
-    const startWidth = columnWidths[field] ?? DEFAULT_COLUMN_WIDTHS[field] ?? 120
-    const handleMouseMove = (moveEvent: MouseEvent): void => {
-      const nextWidth = Math.max(60, startWidth + (moveEvent.clientX - startX))
-      setColumnWidths((prev) => ({ ...prev, [field]: nextWidth }))
-    }
-    const handleMouseUp = (): void => {
-      setActiveResizeColumn(null)
-      window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-    window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
   }
 
   // Unified background-work indicator for the footer's bottom-right slot. Priority order for
