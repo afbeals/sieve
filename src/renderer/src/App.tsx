@@ -47,6 +47,7 @@ import { basenameFallback, describeFileAction, dirnameFallback, formatBytes } fr
 import type { FileAction, GalleryEntry, PreviewSlot, StackEntry } from './types'
 import { useColumnLayout } from './hooks/useColumnLayout'
 import { usePinned } from './hooks/usePinned'
+import { usePreview } from './hooks/usePreview'
 import { useSavedViews } from './hooks/useSavedViews'
 import { useSettings } from './hooks/useSettings'
 import { useStorageBreakdown } from './hooks/useStorageBreakdown'
@@ -83,11 +84,6 @@ export default function App(): React.JSX.Element {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [aggregate, setAggregate] = useState<ListingAggregate | null>(null)
   const [selectedRows, setSelectedRows] = useState<FileRow[]>([])
-  const selectedPathsRef = useRef('')
-  selectedPathsRef.current = selectedRows.map((row) => row.path).join('|')
-  const [previewSlots, setPreviewSlots] = useState<PreviewSlot[]>([])
-  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null)
-  const [thumbnailProgress, setThumbnailProgress] = useState<{ processed: number; total: number } | null>(null)
   const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut' } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; row: FileRow | null } | null>(null)
   const [renamingPath, setRenamingPath] = useState<string | null>(null)
@@ -337,36 +333,17 @@ export default function App(): React.JSX.Element {
     })
   }
 
-  const loadPreviewSlots = useCallback(async (): Promise<void> => {
-    const signature = selectedRows.map((row) => row.path).join('|')
-    if (selectedRows.length === 0 || selectedRows.length > 2) {
-      setPreviewSlots([])
-      return
-    }
-    const slots = await Promise.all(
-      selectedRows.map(async (row): Promise<PreviewSlot> => {
-        if (row.isDirectory) return { row, frames: [], animatedUrl: null, carouselIndex: 0 }
-        const frames = await window.api.getThumbnails(row.path)
-        const animatedUrl = row.ext === 'gif' ? await window.api.getOriginalMedia(row.path) : null
-        return { row, frames, animatedUrl, carouselIndex: 0 }
-      })
-    )
-    if (selectedPathsRef.current !== signature) return
-    setPreviewSlots(slots)
-  }, [selectedRows])
-
-  useEffect(() => {
-    void loadPreviewSlots()
-  }, [loadPreviewSlots])
-
-  useEffect(() => {
-    if (!lightboxUrl) return
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setLightboxUrl(null)
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [lightboxUrl])
+  const {
+    previewSlots,
+    lightboxUrl,
+    setLightboxUrl,
+    thumbnailProgress,
+    setThumbnailProgress,
+    loadPreviewSlots,
+    handleCarouselPrev,
+    handleCarouselNext,
+    handleSetCarouselIndex
+  } = usePreview(selectedRows)
 
   // Context menu (Menu) and the Pinned/Views/Storage panels (Popover) handle their own
   // click-outside and Escape-to-close behavior - no manual window listeners needed for them.
@@ -1090,30 +1067,6 @@ export default function App(): React.JSX.Element {
 
   const handleRemoveGroupWord = (word: string): void => {
     setGroupWords((prev) => prev.filter((w) => w !== word))
-  }
-
-  const handleCarouselPrev = (slotIndex: number): void => {
-    setPreviewSlots((prev) =>
-      prev.map((slot, index) =>
-        index === slotIndex
-          ? { ...slot, carouselIndex: (slot.carouselIndex - 1 + slot.frames.length) % slot.frames.length }
-          : slot
-      )
-    )
-  }
-
-  const handleCarouselNext = (slotIndex: number): void => {
-    setPreviewSlots((prev) =>
-      prev.map((slot, index) =>
-        index === slotIndex ? { ...slot, carouselIndex: (slot.carouselIndex + 1) % slot.frames.length } : slot
-      )
-    )
-  }
-
-  const handleSetCarouselIndex = (slotIndex: number, frameIndex: number): void => {
-    setPreviewSlots((prev) =>
-      prev.map((slot, index) => (index === slotIndex ? { ...slot, carouselIndex: frameIndex } : slot))
-    )
   }
 
   const matchHints = useMemo((): string[] => {
